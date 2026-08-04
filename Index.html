@@ -366,6 +366,89 @@ function handleFiles(fileList) {
   });
 }
 
+/* ==========================================================================
+   REPOSITORY DATA LOADING
+========================================================================== */
+
+const REPOSITORY_FILES = [
+  'data/stats_2024_weekly.csv',
+  'data/stats_2025_weekly.csv',
+  'data/stats_2024_season_totals.csv',
+  'data/stats_2025_season_totals.csv',
+  'data/players_nfl.csv'
+];
+
+async function loadRepositoryData() {
+  const statusLine = document.getElementById('statusLine');
+
+  statusLine.innerHTML =
+    'Loading <b>repository data...</b>';
+
+  let loadedCount = 0;
+
+  for (const filePath of REPOSITORY_FILES) {
+    try {
+      const response = await fetch(filePath);
+
+      // A missing optional file should not stop the app.
+      if (!response.ok) {
+        console.warn(
+          `Could not load ${filePath}: ${response.status}`
+        );
+        continue;
+      }
+
+      const csvText = await response.text();
+
+      const results = Papa.parse(csvText, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true
+      });
+
+      if (results.errors.length) {
+        console.warn(
+          `CSV parsing warnings for ${filePath}:`,
+          results.errors
+        );
+      }
+
+      // Remove "data/" so the existing filename
+      // classification continues to work.
+      const fileName = filePath.split('/').pop();
+
+      classifyAndStore(
+        fileName,
+        results.data
+      );
+
+      addChip(fileName, true);
+
+      loadedCount++;
+
+    } catch (error) {
+      console.error(
+        `Failed to load ${filePath}:`,
+        error
+      );
+
+      const fileName = filePath.split('/').pop();
+
+      addChip(
+        `${fileName} (failed)`,
+        false
+      );
+    }
+  }
+
+  if (loadedCount > 0) {
+    finalizeData();
+  } else {
+    statusLine.innerHTML =
+      'No repository data could be loaded.';
+  }
+}
+
 function addChip(name, ok) {
   const chips = document.getElementById('fileChips');
   const chip = document.createElement('div');
