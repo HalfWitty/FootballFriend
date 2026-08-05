@@ -1,0 +1,1446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>The Stat Sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0c1310;
+    --panel:#121b17;
+    --panel-alt:#182420;
+    --line:#28372f;
+    --line-soft:#1d2b25;
+    --text:#eef2ee;
+    --muted:#8ea394;
+    --gold:#d1a54d;
+    --turf:#4c8c4a;
+    --turf-bright:#6fbf6a;
+    --alert:#c1544c;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--text);
+    font-family:'Inter',sans-serif;
+    min-height:100vh;
+  }
+  .wrap{max-width:1280px;margin:0 auto;padding:28px 20px 80px;}
+
+  /* ---- header ---- */
+  header{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:6px;}
+  h1{
+    font-family:'Teko',sans-serif;
+    font-weight:700;
+    font-size:56px;
+    letter-spacing:1px;
+    margin:0;
+    line-height:0.9;
+    color:var(--text);
+  }
+  h1 span{color:var(--gold);}
+  .subtitle{color:var(--muted);font-size:13px;letter-spacing:2px;text-transform:uppercase;font-weight:500;}
+  .status-line{font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);margin-top:4px;}
+  .status-line b{color:var(--turf-bright);}
+
+  /* ---- yard divider (signature element) ---- */
+  .yard-divider{
+    position:relative;height:22px;margin:22px 0 26px;
+    background-image:repeating-linear-gradient(90deg, var(--line) 0 1px, transparent 1px 40px);
+    background-position:left center;
+    border-top:1px solid var(--line-soft);
+    border-bottom:1px solid var(--line-soft);
+  }
+  .yard-divider::before{
+    content:attr(data-label);
+    position:absolute;left:0;top:-9px;
+    background:var(--bg);
+    padding:0 10px;
+    font-family:'Teko',sans-serif;
+    font-size:15px;
+    letter-spacing:3px;
+    color:var(--gold);
+    text-transform:uppercase;
+  }
+
+  /* ---- upload zone ---- */
+  .dropzone{
+    border:2px dashed var(--line);
+    border-radius:var(--radius);
+    background:var(--panel);
+    padding:26px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone.drag{border-color:var(--turf-bright);background:var(--panel-alt);}
+  .dropzone h3{margin:0 0 6px;font-family:'Teko',sans-serif;font-size:26px;letter-spacing:1px;font-weight:600;}
+  .dropzone p{margin:0;color:var(--muted);font-size:13px;line-height:1.6;}
+  .dropzone input{display:none;}
+  .file-chip-row{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;justify-content:center;}
+  .file-chip{
+    font-family:'JetBrains Mono',monospace;font-size:11px;
+    background:var(--panel-alt);border:1px solid var(--line);
+    border-radius:20px;padding:5px 12px;color:var(--muted);
+  }
+  .file-chip.ok{color:var(--turf-bright);border-color:var(--turf);}
+
+  /* ---- tabs ---- */
+  .tabs{display:flex;gap:6px;margin:8px 0 20px;}
+  .tab-btn{
+    font-family:'Teko',sans-serif;font-size:20px;letter-spacing:2px;font-weight:600;
+    background:var(--panel);border:1px solid var(--line);color:var(--muted);
+    padding:8px 22px;border-radius:6px;cursor:pointer;text-transform:uppercase;
+    transition:all .15s;
+  }
+  .tab-btn.active{background:var(--turf);color:#08130a;border-color:var(--turf);}
+  .tab-btn:disabled{opacity:.35;cursor:not-allowed;}
+
+  .panel{display:none;}
+  .panel.active{display:block;}
+
+  /* ---- controls ---- */
+  .controls{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end;margin-bottom:18px;}
+  .field{display:flex;flex-direction:column;gap:5px;}
+  .field label{font-size:11px;text-transform:uppercase;letter-spacing:1.5px;color:var(--muted);font-weight:600;}
+  select, .search-input{
+    background:var(--panel-alt);color:var(--text);border:1px solid var(--line);
+    border-radius:6px;padding:8px 10px;font-family:'Inter',sans-serif;font-size:13px;
+    min-width:170px;
+  }
+  select:focus, .search-input:focus{outline:1px solid var(--turf-bright);}
+
+  /* ---- table ---- */
+  .table-scroll{overflow-x:auto;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);}
+  table{border-collapse:collapse;width:100%;font-family:'JetBrains Mono',monospace;font-size:12.5px;white-space:nowrap;}
+  thead th{
+    position:sticky;top:0;background:var(--panel-alt);
+    text-align:right;padding:9px 12px;cursor:pointer;user-select:none;
+    color:var(--gold);font-weight:600;border-bottom:1px solid var(--line);
+  }
+  thead th:first-child, thead th:nth-child(2), thead th:nth-child(3){text-align:left;color:var(--gold);}
+  thead th:hover{background:#213028;}
+  thead th.sorted::after{content:" \25BE";}
+  thead th.sorted-asc::after{content:" \25B4";}
+  tbody td{padding:7px 12px;text-align:right;border-bottom:1px solid var(--line-soft);color:var(--text);}
+  tbody td:first-child, tbody td:nth-child(2), tbody td:nth-child(3){text-align:left;}
+  tbody tr:hover{background:var(--panel-alt);}
+  tbody td:first-child{color:var(--text);font-weight:500;}
+  tr.league-avg-row td{background:rgba(209,165,77,0.12);color:var(--gold);font-weight:700;}
+  .pos-tag{
+    display:inline-block;font-family:'Inter',sans-serif;font-size:10px;font-weight:700;
+    padding:1px 6px;border-radius:4px;background:var(--line);color:var(--muted);
+  }
+
+  /* ---- chart cards ---- */
+  .chart-card{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px 18px;margin-top:16px;
+  }
+  .chart-card h4{
+    margin:0 0 10px;font-family:'Teko',sans-serif;font-size:20px;letter-spacing:1px;
+    font-weight:600;color:var(--text);text-transform:uppercase;
+  }
+  .chart-card h4 span{color:var(--muted);font-size:14px;text-transform:none;letter-spacing:0;}
+  .chart-box{position:relative;width:100%;height:260px;}
+  .chart-box.tall{height:340px;}
+  .chart-box.short{height:200px;}
+
+  /* ---- player search ---- */
+  .player-search-wrap{position:relative;}
+  .suggest-list{
+    position:absolute;top:100%;left:0;right:0;z-index:20;
+    background:var(--panel-alt);border:1px solid var(--line);border-top:none;
+    max-height:260px;overflow-y:auto;border-radius:0 0 6px 6px;
+  }
+  .suggest-item{padding:8px 12px;cursor:pointer;font-size:13px;border-bottom:1px solid var(--line-soft);}
+  .suggest-item:hover{background:var(--turf);color:#08130a;}
+  .suggest-item small{color:var(--muted);margin-left:6px;}
+  .suggest-item:hover small{color:#08130a;}
+
+  .player-header{
+    display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px 20px;margin-bottom:4px;
+  }
+  .player-header h2{font-family:'Teko',sans-serif;font-size:38px;margin:0;font-weight:700;}
+  .player-header .pos-tag{font-size:12px;padding:3px 9px;background:var(--turf);color:#08130a;}
+  .player-header .team-tag{font-family:'JetBrains Mono',monospace;color:var(--muted);font-size:13px;}
+
+  .season-cards{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:16px 0;}
+  @media(max-width:700px){.season-cards{grid-template-columns:1fr;}}
+  .season-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;}
+  .season-card h5{font-family:'Teko',sans-serif;font-size:20px;letter-spacing:1px;margin:0 0 10px;color:var(--gold);}
+  .stat-grid{display:grid;grid-template-columns:1fr auto;gap:5px 10px;font-family:'JetBrains Mono',monospace;font-size:12.5px;}
+  .stat-grid .k{color:var(--muted);}
+  .stat-grid .v{text-align:right;font-weight:600;}
+
+  .mini-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;margin-top:16px;}
+  .mini-chart-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;}
+  .mini-chart-card h5{margin:0 0 6px;font-family:'Teko',sans-serif;font-size:16px;letter-spacing:1px;color:var(--text);text-transform:uppercase;}
+  .mini-chart-card canvas{max-height:130px;}
+
+  .empty-note{color:var(--muted);font-size:13px;padding:30px 10px;text-align:center;font-style:italic;}
+  .toggle-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);}
+  .toggle-row input{accent-color:var(--turf);}
+  ::-webkit-scrollbar{height:8px;width:8px;}
+  ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px;}
+  ::-webkit-scrollbar-track{background:var(--panel);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div>
+      <h1>THE STAT <span>SHEET</span></h1>
+      <div class="subtitle">Sleeper NFL Data Explorer &middot; 2024&ndash;2025</div>
+    </div>
+  </header>
+  <div id="statusLine" class="status-line">No data loaded yet.</div>
+
+  <div class="yard-divider" data-label="Load Data"></div>
+
+  <div class="dropzone" id="dropzone">
+    <input type="file" id="fileInput" multiple accept=".csv">
+    <h3>Drop your Sleeper CSVs here, or click to browse</h3>
+    <p>
+      stats_2024_weekly.csv &middot; stats_2025_weekly.csv &middot;
+      stats_2024_season_totals.csv &middot; stats_2025_season_totals.csv &middot;
+      players_nfl.csv (optional &ndash; only needed if names aren't already merged into your stats files)
+    </p>
+    <div class="file-chip-row" id="fileChips"></div>
+  </div>
+
+  <div class="yard-divider" data-label="Explore"></div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-tab="team" disabled>Team</button>
+    <button class="tab-btn" data-tab="position" disabled>Position</button>
+    <button class="tab-btn" data-tab="player" disabled>Player</button>
+  </div>
+
+  <!-- ============ TEAM PANEL ============ -->
+  <div class="panel active" id="panel-team">
+    <div class="controls">
+      <div class="field">
+        <label>NFL Team</label>
+        <select id="teamSelect"></select>
+      </div>
+      <div class="field">
+        <label>Stat</label>
+        <select id="teamStatSelect"></select>
+      </div>
+    </div>
+
+    <div class="table-scroll"><table id="teamTable"></table></div>
+
+    <div class="chart-card">
+      <h4>Weekly Trend &mdash; <span id="teamChartLabel"></span></h4>
+      <div class="chart-box"><canvas id="teamChart"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <h4>Target Share &mdash; <span id="targetShareLabel"></span></h4>
+      <div class="chart-box short"><canvas id="targetShareChart"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <h4>Carry Share &mdash; <span id="carryShareLabel"></span></h4>
+      <div class="chart-box short"><canvas id="carryShareChart"></canvas></div>
+    </div>
+
+    <div class="chart-card">
+      <h4>Pass/Run Tendency &amp; Schedule &mdash; <span id="teamScheduleLabel"></span></h4>
+      <div class="table-scroll" style="max-height:460px;overflow-y:auto;"><table id="teamScheduleTable"></table></div>
+    </div>
+  </div>
+
+  <!-- ============ POSITION PANEL ============ -->
+  <div class="panel" id="panel-position">
+    <div class="controls">
+      <div class="field">
+        <label>Position</label>
+        <select id="posSelect"></select>
+      </div>
+      <div class="field">
+        <label>Stat</label>
+        <select id="posStatSelect"></select>
+      </div>
+      <div class="field">
+        <label>Search</label>
+        <input class="search-input" id="posFilter" placeholder="Filter by name...">
+      </div>
+    </div>
+    <p class="empty-note" id="posOpportunityNote" style="text-align:left;padding:0 0 10px;"></p>
+    <div class="table-scroll"><table id="posTable"></table></div>
+    <div class="chart-card">
+      <h4>Top 15 by <span id="posChartLabel"></span></h4>
+      <div class="chart-box tall"><canvas id="posChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h4>Weekly Breakdown &mdash; <span id="posWeeklyLabel"></span></h4>
+      <div class="table-scroll" style="max-height:520px;overflow-y:auto;"><table id="posWeeklyTable"></table></div>
+    </div>
+  </div>
+
+  <!-- ============ PLAYER PANEL ============ -->
+  <div class="panel" id="panel-player">
+    <div class="controls">
+      <div class="field player-search-wrap" style="flex:1;min-width:260px;">
+        <label>Player Search</label>
+        <input class="search-input" id="playerSearch" placeholder="Type a player name..." style="width:100%;" autocomplete="off">
+        <div class="suggest-list" id="playerSuggest" style="display:none;"></div>
+      </div>
+      <div class="field">
+        <label>Weekly Stat</label>
+        <select id="playerStatSelect"></select>
+      </div>
+    </div>
+    <div id="playerDetail"><div class="empty-note">Search for a player above to see their full stat breakdown.</div></div>
+  </div>
+
+</div>
+
+<script>
+/* ==========================================================================
+   STATE
+========================================================================== */
+const ID_FIELDS = new Set([
+  'player_id','season','week','full_name','first_name','last_name','position','team','status',
+  'team_x','team_y','status_x','status_y','date','category','last_modified','sport','season_type',
+  'player','updated_at','game_id','week_shard','company','opponent'
+]);
+const PRIORITY_STATS = ['pts_ppr','pts_half_ppr','pts_std','pass_yd','pass_td','rush_yd','rush_td','rec','rec_yd','rec_td'];
+const FANTASY_POSITIONS = ['QB','RB','WR','TE','K'];
+
+let state = {
+  players: new Map(),      // player_id -> {player_id, full_name, position, team}
+  weekly: [],               // [{player_id, season, week, ...stats}]
+  seasonTotals: [],         // [{player_id, season, ...stats}]
+  statColumns: [],          // sorted list of numeric stat field names
+  seasons: [],               // sorted list of season values present
+  selectedPlayerId: null,
+  filesLoaded: []
+};
+
+let charts = {}; // canvasId -> Chart instance, so we can destroy/redraw
+
+/* ==========================================================================
+   FILE HANDLING
+========================================================================== */
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+
+dropzone.addEventListener('click', () => fileInput.click());
+['dragover','dragenter'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); dropzone.classList.add('drag');
+}));
+['dragleave','drop'].forEach(evt => dropzone.addEventListener(evt, e => {
+  e.preventDefault(); dropzone.classList.remove('drag');
+}));
+dropzone.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
+fileInput.addEventListener('change', e => handleFiles(e.target.files));
+
+function handleFiles(fileList) {
+  const files = Array.from(fileList).filter(f => f.name.endsWith('.csv'));
+  if (!files.length) return;
+  let pending = files.length;
+  files.forEach(file => {
+    Papa.parse(file, {
+      header: true,
+      dynamicTyping: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        classifyAndStore(file.name, results.data);
+        pending--;
+        addChip(file.name, true);
+        if (pending === 0) finalizeData();
+      },
+      error: () => { addChip(file.name + ' (failed)', false); pending--; }
+    });
+  });
+}
+
+/* ==========================================================================
+   REPOSITORY DATA LOADING
+========================================================================== */
+
+const REPOSITORY_FILES = [
+  'data/stats_2024_weekly_part1.csv',
+  'data/stats_2024_weekly_part2.csv',
+  'data/stats_2025_weekly_part1.csv',
+  'data/stats_2025_weekly_part2.csv',
+  'data/stats_2024_season_totals.csv',
+  'data/stats_2025_season_totals.csv',
+  'data/league_2025_draft_picks.csv',
+  'data/league_2025_matchups.csv',
+  'data/league_2025_rosters.csv',
+  'data/league_2025_transactions.csv',
+  'data/league_2025_users.csv',
+  'data/league_2026_rosters.csv',
+  'data/players_nfl.csv'
+];
+
+async function loadRepositoryData() {
+  const statusLine = document.getElementById('statusLine');
+
+  statusLine.innerHTML =
+    'Loading <b>repository data...</b>';
+
+  let loadedCount = 0;
+  const cacheBust = Date.now(); // forces a fresh fetch each page load, bypassing browser/CDN caches
+
+  for (const filePath of REPOSITORY_FILES) {
+    try {
+      const response = await fetch(`${filePath}?v=${cacheBust}`, { cache: 'no-store' });
+
+      // A missing optional file should not stop the app.
+      if (!response.ok) {
+        console.warn(
+          `Could not load ${filePath}: ${response.status}`
+        );
+        addChip(`${filePath.split('/').pop()} (HTTP ${response.status})`, false);
+        continue;
+      }
+
+      const csvText = await response.text();
+
+      const results = Papa.parse(csvText, {
+        header: true,
+        dynamicTyping: true,
+        skipEmptyLines: true
+      });
+
+      if (results.errors.length) {
+        console.warn(
+          `CSV parsing warnings for ${filePath}:`,
+          results.errors
+        );
+      }
+
+      // Remove "data/" so the existing filename
+      // classification continues to work.
+      const fileName = filePath.split('/').pop();
+
+      classifyAndStore(
+        fileName,
+        results.data
+      );
+
+      addChip(fileName, true);
+
+      loadedCount++;
+
+    } catch (error) {
+      console.error(
+        `Failed to load ${filePath}:`,
+        error
+      );
+
+      const fileName = filePath.split('/').pop();
+
+      addChip(
+        `${fileName} (failed)`,
+        false
+      );
+    }
+  }
+
+  if (loadedCount > 0) {
+    finalizeData();
+  } else {
+    statusLine.innerHTML =
+      'No repository data could be loaded.';
+  }
+}
+
+function addChip(name, ok) {
+  const chips = document.getElementById('fileChips');
+  const chip = document.createElement('div');
+  chip.className = 'file-chip' + (ok ? ' ok' : '');
+  chip.textContent = (ok ? '\u2713 ' : '\u2715 ') + name;
+  chips.appendChild(chip);
+  state.filesLoaded.push(name);
+}
+
+function classifyAndStore(filename, rows) {
+  if (!rows.length) return;
+  const cols = new Set(Object.keys(rows[0]));
+  const fname = filename.toLowerCase();
+
+  // Prefer filename signal first (our export script names files predictably).
+  // Fall back to header/content heuristics for renamed or hand-exported files.
+  let kind;
+  if (fname.includes('weekly')) kind = 'weekly';
+  else if (fname.includes('season_total') || fname.includes('season-total') || fname.includes('totals')) kind = 'season';
+  else if ((fname.includes('player') && cols.has('full_name') && !cols.has('season'))) kind = 'players';
+  else {
+    // content-based fallback: season-totals files can still HAVE a 'week' column
+    // (Sleeper leaves it blank), so check whether it's actually populated,
+    // not just present.
+    const weekPopulated = rows.some(r => r.week !== null && r.week !== undefined && r.week !== '');
+    if (cols.has('full_name') && cols.has('position') && !cols.has('season')) kind = 'players';
+    else if (cols.has('season') && weekPopulated) kind = 'weekly';
+    else if (cols.has('season')) kind = 'season';
+    else kind = 'unknown';
+  }
+
+  if (kind === 'players') {
+    rows.forEach(r => {
+      if (r.player_id == null) return;
+      const pid = String(r.player_id);
+      state.players.set(pid, {
+        player_id: pid,
+        full_name: r.full_name || `${r.first_name||''} ${r.last_name||''}`.trim(),
+        position: r.position || 'UNK',
+        team: r.team || 'FA'
+      });
+    });
+  } else if (kind === 'weekly') {
+    rows.forEach(r => { if (r.player_id != null) state.weekly.push(normalizeRow(r)); });
+  } else if (kind === 'season') {
+    rows.forEach(r => { if (r.player_id != null) state.seasonTotals.push(normalizeRow(r)); });
+  }
+}
+
+function normalizeRow(r) {
+  r.player_id = String(r.player_id);
+  // Sleeper's raw stats rows already carry their own team/status, and merging
+  // in the player-directory columns caused pandas to suffix both to _x/_y.
+  // _x = the value at the time of that stat row (historically accurate);
+  // _y = today's directory snapshot. Prefer _x, fall back to _y.
+  if (!r.team) r.team = (r.team_x && r.team_x !== '') ? r.team_x : (r.team_y || '');
+  if (!r.status) r.status = (r.status_x && r.status_x !== '') ? r.status_x : (r.status_y || '');
+
+  // pick up name/pos/team if present directly on the stats row too
+  if (r.full_name) {
+    const pid = r.player_id;
+    if (!state.players.has(pid)) {
+      state.players.set(pid, { player_id: pid, full_name: r.full_name, position: r.position || 'UNK', team: r.team || 'FA' });
+    }
+  }
+  return r;
+}
+
+function finalizeData() {
+  // fill in any stats rows missing name/pos/team from the players map
+  [...state.weekly, ...state.seasonTotals].forEach(r => {
+    let p = state.players.get(r.player_id);
+    if (!p && r.player_id && r.player_id.startsWith('TEAM_')) {
+      p = state.players.get(r.player_id.slice(5)); // e.g. TEAM_DAL -> DAL (defense ID mismatch across Sleeper endpoints)
+    }
+    if (p) {
+      if (!r.full_name) r.full_name = p.full_name;
+      if (!r.position) r.position = p.position;
+      if (!r.team) r.team = p.team;
+    }
+    r.full_name = r.full_name || 'Unknown Player';
+    r.position = r.position || 'UNK';
+    r.team = r.team || 'FA';
+  });
+
+  // derive stat columns (numeric fields not in ID_FIELDS), union across weekly+season data
+  const statSet = new Set();
+  [...state.seasonTotals, ...state.weekly].forEach(r => {
+    Object.keys(r).forEach(k => { if (!ID_FIELDS.has(k)) statSet.add(k); });
+  });
+  const rest = [...statSet].filter(s => !PRIORITY_STATS.includes(s)).sort();
+  state.statColumns = [...PRIORITY_STATS.filter(s => statSet.has(s)), ...rest];
+
+  // derive season list
+  const seasonSet = new Set([...state.seasonTotals, ...state.weekly].map(r => r.season));
+  state.seasons = [...seasonSet].filter(s => s != null).sort();
+
+  updateStatusLine();
+  if (state.seasonTotals.length || state.weekly.length) enableTabs();
+  populateAllControls();
+  renderTeamTab();
+  renderPositionTab();
+}
+
+function updateStatusLine() {
+  document.getElementById('statusLine').innerHTML =
+    `Loaded <b>${state.filesLoaded.length}</b> file(s) &middot; <b>${state.players.size}</b> players in directory &middot; ` +
+    `<b>${state.seasonTotals.length}</b> season-total rows &middot; <b>${state.weekly.length}</b> weekly rows &middot; ` +
+    `seasons: <b>${state.seasons.join(', ') || '—'}</b>`;
+}
+
+function enableTabs() {
+  document.querySelectorAll('.tab-btn').forEach(b => b.disabled = false);
+}
+
+/* ==========================================================================
+   TABS
+========================================================================== */
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.disabled) return;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+/* ==========================================================================
+   SHARED HELPERS
+========================================================================== */
+function fmt(v) {
+  if (v === null || v === undefined || v === '') return '—';
+  if (typeof v === 'number') return Number.isInteger(v) ? v.toString() : v.toFixed(1);
+  return v;
+}
+function statLabel(s) {
+  return s.replace(/_/g,' ').replace(/\b\w/g, c => c.toUpperCase());
+}
+function uniqueSorted(arr) { return [...new Set(arr)].filter(x => x != null && x !== '').sort(); }
+
+function buildTimeline() {
+  // labels like "24·W1" ... across all loaded seasons, weeks 1-18
+  const labels = [];
+  const keyIndex = {}; // "season-week" -> index
+  state.seasons.forEach(season => {
+    for (let w = 1; w <= 18; w++) {
+      keyIndex[`${season}-${w}`] = labels.length;
+      labels.push(`'${String(season).slice(-2)} W${w}`);
+    }
+  });
+  return { labels, keyIndex };
+}
+
+function destroyChart(id) {
+  if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+}
+
+const PALETTE = ['#6fbf6a','#d1a54d','#c1544c','#5aa7c9','#b083d1','#e0956b','#8ec9a0','#c9c15a','#7a8fd1','#d17aae'];
+
+/* ==========================================================================
+   TEAM TAB
+========================================================================== */
+function populateAllControls() {
+  const teamsFromStats = [...state.seasonTotals, ...state.weekly].map(r => r.team).filter(t => t && t !== 'FA');
+  const teamsFromDirectory = [...state.players.values()].map(p => p.team).filter(t => t && t !== 'FA');
+  const teams = uniqueSorted([...teamsFromStats, ...teamsFromDirectory]);
+  fillSelect('teamSelect', teams);
+  fillSelect('teamStatSelect', state.statColumns.map(s => ({v:s, t:statLabel(s)})));
+
+  const availablePositions = new Set([...[...state.seasonTotals, ...state.weekly].map(r => r.position), ...[...state.players.values()].map(p => p.position)]);
+  const positions = FANTASY_POSITIONS.filter(p => availablePositions.has(p));
+  fillSelect('posSelect', positions);
+  fillSelect('posStatSelect', state.statColumns.map(s => ({v:s, t:statLabel(s)})));
+
+  fillSelect('playerStatSelect', state.statColumns.map(s => ({v:s, t:statLabel(s)})));
+  document.getElementById('playerStatSelect').addEventListener('change', () => {
+    if (state.selectedPlayerId) renderPlayerDetail(state.selectedPlayerId);
+  });
+
+  ['teamSelect','teamStatSelect'].forEach(id =>
+    document.getElementById(id).addEventListener('change', renderTeamTab));
+  document.getElementById('posSelect').addEventListener('change', renderPositionTab);
+  document.getElementById('posStatSelect').addEventListener('change', () => {
+    posSortState.key = null; posSortState.dir = -1; renderPositionTab();
+  });
+  document.getElementById('posFilter').addEventListener('input', renderPositionTab);
+}
+
+function fillSelect(id, options, addAllOption) {
+  const sel = document.getElementById(id);
+  const prev = sel.value;
+  sel.innerHTML = '';
+  if (addAllOption) {
+    const o = document.createElement('option'); o.value = 'ALL'; o.textContent = 'All Seasons';
+    sel.appendChild(o);
+  }
+  options.forEach(opt => {
+    const o = document.createElement('option');
+    if (typeof opt === 'object') { o.value = opt.v; o.textContent = opt.t; }
+    else { o.value = opt; o.textContent = opt; }
+    sel.appendChild(o);
+  });
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+let teamSortState = { key: null, dir: -1 };
+
+function computeStdevCV(valuesArray) {
+  const vals = valuesArray.filter(v => v !== null && v !== undefined);
+  if (!vals.length) return { stdev: null, cv: null, mean: null };
+  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+  if (vals.length < 2) return { stdev: null, cv: null, mean: +mean.toFixed(2) };
+  const variance = vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length;
+  const stdev = Math.sqrt(variance);
+  const cv = mean !== 0 ? +(100 * stdev / Math.abs(mean)).toFixed(1) : null;
+  return { stdev: +stdev.toFixed(2), cv, mean: +mean.toFixed(2) };
+}
+
+// player_id -> weekly rows while actually on this team (accurate for traded players).
+// Excludes Sleeper's team-level aggregate rows (player_id like "TEAM_DAL"), which
+// duplicate the sum of every individual player's stats for that team/week and
+// would otherwise double-count team totals and dominate share charts.
+function weeklyRowsForTeam(team) {
+  return state.weekly.filter(r => r.team === team && !String(r.player_id).startsWith('TEAM_'));
+}
+
+function buildTeamRosterRows(team, stat) {
+  const rows = weeklyRowsForTeam(team);
+  const byPlayer = new Map();
+  rows.forEach(r => {
+    if (!byPlayer.has(r.player_id)) byPlayer.set(r.player_id, { player_id: r.player_id, full_name: r.full_name, position: r.position, _vals: {} });
+    const entry = byPlayer.get(r.player_id);
+    const season = String(r.season);
+    if (!entry._vals[season]) entry._vals[season] = [];
+    entry._vals[season].push(numOrNull(r[stat]));
+  });
+  const out = [];
+  byPlayer.forEach(entry => {
+    state.seasons.forEach(season => {
+      const vals = entry._vals[season] || [];
+      const gp = vals.length;
+      const total = vals.reduce((a, b) => a + (b || 0), 0);
+      const { stdev, cv } = computeStdevCV(vals);
+      entry[`gp_${season}`] = gp;
+      entry[`total_${season}`] = gp ? +total.toFixed(2) : null;
+      entry[`avg_${season}`] = gp > 0 ? +(total / gp).toFixed(2) : null;
+      entry[`cv_${season}`] = cv;
+    });
+    delete entry._vals;
+    out.push(entry);
+  });
+  return out;
+}
+
+function renderTeamTab() {
+  if (!state.statColumns.length) return;
+  const team = document.getElementById('teamSelect').value;
+  const stat = document.getElementById('teamStatSelect').value;
+  if (!team) return;
+
+  // ---- roster + consistency table ----
+  let rows = buildTeamRosterRows(team, stat);
+  rows = rows.filter(r => state.seasons.some(s => hasMeaningfulValue(r[`total_${s}`])));
+
+  const latestSeason = state.seasons[state.seasons.length - 1];
+  if (!teamSortState.key) teamSortState.key = `total_${latestSeason}`;
+  rows = [...rows].sort((a, b) => ((Number(a[teamSortState.key]) || 0) - (Number(b[teamSortState.key]) || 0)) * teamSortState.dir);
+
+  const cols = ['full_name', 'position',
+    ...state.seasons.map(s => `total_${s}`),
+    ...state.seasons.map(s => `avg_${s}`),
+    ...state.seasons.map(s => `cv_${s}`)];
+  const labels = {};
+  state.seasons.forEach(s => { labels[`cv_${s}`] = `Volatility % ${s}`; });
+  renderTable('teamTable', rows, cols, stat, true, { sortState: teamSortState, onSort: renderTeamTab, labels });
+
+  // ---- weekly trend chart (one line per roster player) ----
+  try {
+    document.getElementById('teamChartLabel').textContent = `${statLabel(stat)} — ${team}`;
+    const { labels: tlabels, keyIndex } = buildTimeline();
+    const datasets = [];
+    const rosterIds = uniqueSorted(rows.map(r => r.player_id)).slice(0, 12);
+    rosterIds.forEach((pid, i) => {
+      const p = state.players.get(pid);
+      const name = p ? p.full_name : (rows.find(r => r.player_id === pid) || {}).full_name || pid;
+      const data = new Array(tlabels.length).fill(null);
+      state.weekly.filter(r => r.player_id === pid).forEach(r => {
+        const idx = keyIndex[`${r.season}-${r.week}`];
+        if (idx !== undefined) data[idx] = numOrNull(r[stat]);
+      });
+      if (data.some(d => d !== null)) {
+        datasets.push({ label: name, data, borderColor: PALETTE[i % PALETTE.length], backgroundColor: 'transparent', spanGaps: false, tension: .25, pointRadius: 2 });
+      }
+    });
+    drawLineChart('teamChart', tlabels, datasets);
+  } catch (err) { console.error('Team weekly trend chart failed:', err); }
+
+  try { renderShareCharts(team); } catch (err) { console.error('Share charts failed:', err); }
+  try { renderTeamScheduleTable(team); } catch (err) { console.error('Team schedule table failed:', err); }
+}
+
+// ---- target / carry share: who touches the ball ----
+function renderShareCharts(team) {
+  document.getElementById('targetShareLabel').textContent = team;
+  document.getElementById('carryShareLabel').textContent = team;
+  if (!state.statColumns.includes('rec_tgt') && !state.statColumns.includes('rush_att')) {
+    document.getElementById('targetShareLabel').textContent += ' (rec_tgt not found in loaded data)';
+  }
+  const teamRows = weeklyRowsForTeam(team);
+
+  function buildShare(statKey) {
+    const bySeason = {};
+    state.seasons.forEach(s => { bySeason[s] = { total: 0, byPlayer: new Map() }; });
+    teamRows.forEach(r => {
+      const season = String(r.season);
+      if (!bySeason[season]) return;
+      const v = numOrNull(r[statKey]) || 0;
+      bySeason[season].total += v;
+      bySeason[season].byPlayer.set(r.player_id, (bySeason[season].byPlayer.get(r.player_id) || 0) + v);
+      bySeason[season]._name = bySeason[season]._name || {};
+      bySeason[season]._name[r.player_id] = r.full_name;
+    });
+    // rank players by most recent season's raw total, take top 8
+    const latest = String(state.seasons[state.seasons.length - 1]);
+    const ranked = [...(bySeason[latest] ? bySeason[latest].byPlayer.entries() : [])]
+      .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([pid]) => pid);
+    const names = ranked.map(pid => (bySeason[latest]._name && bySeason[latest]._name[pid]) || pid);
+    const datasets = state.seasons.map((season, i) => ({
+      label: String(season),
+      data: ranked.map(pid => {
+        const seasonData = bySeason[String(season)];
+        if (!seasonData || !seasonData.total) return 0;
+        const playerTotal = seasonData.byPlayer.get(pid) || 0;
+        return +(100 * playerTotal / seasonData.total).toFixed(1);
+      }),
+      backgroundColor: PALETTE[i % PALETTE.length]
+    }));
+    return { names, datasets };
+  }
+
+  if (state.statColumns.includes('rec_tgt')) {
+    const { names, datasets } = buildShare('rec_tgt');
+    drawGroupedBarChart('targetShareChart', names, datasets, '%');
+  }
+  if (state.statColumns.includes('rush_att')) {
+    const { names, datasets } = buildShare('rush_att');
+    drawGroupedBarChart('carryShareChart', names, datasets, '%');
+  }
+}
+
+// ---- pass/run tendency by week + opponent (matchup context) ----
+function renderTeamScheduleTable(team) {
+  document.getElementById('teamScheduleLabel').textContent = team;
+  const table = document.getElementById('teamScheduleTable');
+  table.innerHTML = '';
+  const hasPassAtt = state.statColumns.includes('pass_att');
+  const hasRushAtt = state.statColumns.includes('rush_att');
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  ['Season', 'Week', 'Opponent', 'Team Pass Att', 'Team Rush Att', 'Pass %'].forEach(label => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const teamRows = weeklyRowsForTeam(team);
+  let anyRow = false;
+
+  state.seasons.forEach(season => {
+    for (let w = 1; w <= 18; w++) {
+      const wkRows = teamRows.filter(r => String(r.season) === String(season) && Number(r.week) === w);
+      if (!wkRows.length) continue;
+      anyRow = true;
+      const passAtt = hasPassAtt ? wkRows.reduce((a, r) => a + (numOrNull(r.pass_att) || 0), 0) : null;
+      const rushAtt = hasRushAtt ? wkRows.reduce((a, r) => a + (numOrNull(r.rush_att) || 0), 0) : null;
+      const passPct = (passAtt !== null && rushAtt !== null && (passAtt + rushAtt) > 0)
+        ? +(100 * passAtt / (passAtt + rushAtt)).toFixed(1) : null;
+      const opponentRow = wkRows.find(r => r.opponent && r.opponent !== '');
+      const opponent = opponentRow ? opponentRow.opponent : '—';
+
+      const tr = document.createElement('tr');
+      const cells = [season, w, opponent, fmt(passAtt), fmt(rushAtt), passPct !== null ? passPct + '%' : '—'];
+      cells.forEach(val => {
+        const td = document.createElement('td');
+        td.textContent = val;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    }
+  });
+
+  table.appendChild(tbody);
+  if (!anyRow) table.innerHTML += `<tr><td class="empty-note">No weekly data for this team.</td></tr>`;
+}
+
+function numOrNull(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
+function hasMeaningfulValue(v) {
+  if (v === null || v === undefined || v === '') return false;
+  const n = Number(v);
+  return !Number.isNaN(n) && n !== 0;
+}
+
+function computeLeagueWeekAverages(position, stat, season) {
+  const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
+  const rows = state.weekly.filter(r => r.position === position && String(r.season) === String(season));
+  const weekAverages = weeks.map(w => {
+    const vals = rows.filter(r => Number(r.week) === w).map(r => numOrNull(r[stat])).filter(v => v !== null);
+    return vals.length ? +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : null;
+  });
+  const overallVals = weekAverages.filter(v => v !== null);
+  const overallAvg = overallVals.length ? +(overallVals.reduce((a, b) => a + b, 0) / overallVals.length).toFixed(2) : null;
+  return { weekAverages, overallAvg };
+}
+
+function fmtDiff(v) {
+  if (v === null || v === undefined || Number.isNaN(v)) return '—';
+  const sign = v > 0 ? '+' : '';
+  return sign + v.toFixed(2);
+}
+
+/* ==========================================================================
+   POSITION TAB
+========================================================================== */
+let posSortState = { key: null, dir: -1 };
+
+// Position-appropriate volume fields that define "opportunity" - the raw chances
+// a player gets, independent of whether they capitalize on them.
+const OPPORTUNITY_FIELDS = {
+  QB: ['pass_att', 'rush_att'],
+  RB: ['rush_att', 'rec_tgt'],
+  WR: ['rec_tgt'],
+  TE: ['rec_tgt'],
+  K: ['fga', 'xpa']
+};
+const OPPORTUNITY_LABELS = {
+  QB: 'pass attempts + rush attempts',
+  RB: 'carries + targets',
+  WR: 'targets',
+  TE: 'targets',
+  K: 'FG attempts + XP attempts'
+};
+const POINTS_FIELDS_PRIORITY = ['pts_ppr', 'pts_half_ppr', 'pts_std'];
+
+// Ranks every player at a position, for one season, by raw opportunity volume
+// and by "success rate" (fantasy points earned per unit of opportunity - a
+// simple, position-agnostic efficiency measure). Rank 1 = best.
+function computeOpportunityAndSuccess(pos, season) {
+  const fields = OPPORTUNITY_FIELDS[pos] || [];
+  const pointsField = POINTS_FIELDS_PRIORITY.find(f => state.statColumns.includes(f));
+  const rows = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season) && (Number(r.gp) || 0) > 0);
+
+  const computed = rows.map(r => {
+    const opportunity = fields.reduce((sum, f) => sum + (numOrNull(r[f]) || 0), 0);
+    const points = pointsField ? (numOrNull(r[pointsField]) || 0) : null;
+    return { player_id: r.player_id, opportunity, points };
+  }).filter(c => c.opportunity > 0);
+
+  const byOpp = [...computed].sort((a, b) => b.opportunity - a.opportunity);
+  const oppRankMap = new Map(byOpp.map((c, i) => [c.player_id, i + 1]));
+  const oppValueMap = new Map(computed.map(c => [c.player_id, c.opportunity]));
+
+  // Success rate (points per opportunity) is only meaningful with a real sample size -
+  // a player with 1-2 opportunities and a lucky long score would otherwise dominate the
+  // rank. Require at least 50% of the position's median opportunity that season to qualify.
+  const opportunities = computed.map(c => c.opportunity).sort((a, b) => a - b);
+  const mid = Math.floor(opportunities.length / 2);
+  const medianOpp = opportunities.length
+    ? (opportunities.length % 2 ? opportunities[mid] : (opportunities[mid - 1] + opportunities[mid]) / 2)
+    : 0;
+  const minQualifyingOpp = medianOpp * 0.5;
+
+  const qualified = computed.filter(c => c.opportunity >= minQualifyingOpp && c.points !== null);
+  const withSuccess = qualified.map(c => ({ ...c, successRate: +(c.points / c.opportunity).toFixed(3) }));
+  const bySuccess = [...withSuccess].sort((a, b) => b.successRate - a.successRate);
+  const successRankMap = new Map(bySuccess.map((c, i) => [c.player_id, i + 1]));
+  const successValueMap = new Map(withSuccess.map(c => [c.player_id, c.successRate]));
+
+  return { oppRankMap, successRankMap, oppValueMap, successValueMap, oppPoolSize: byOpp.length, successPoolSize: bySuccess.length, minQualifyingOpp: Math.round(minQualifyingOpp) };
+}
+
+function buildPositionSeasonRows(pos, stat) {
+  const rowsForPos = state.seasonTotals.filter(r => r.position === pos);
+  const byPlayer = new Map();
+  rowsForPos.forEach(r => {
+    if (!byPlayer.has(r.player_id)) {
+      byPlayer.set(r.player_id, { player_id: r.player_id, full_name: r.full_name, team: r.team });
+    }
+    const entry = byPlayer.get(r.player_id);
+    const season = String(r.season);
+    const gp = Number(r.gp) || 0;
+    const total = Number(r[stat]) || 0;
+    entry[`gp_${season}`] = gp;
+    entry[`total_${season}`] = total;
+    entry[`avg_${season}`] = gp > 0 ? +(total / gp).toFixed(2) : null;
+    entry.team = r.team || entry.team; // prefer most recently seen team
+  });
+  return [...byPlayer.values()];
+}
+
+function renderPositionTab() {
+  if (!state.statColumns.length) return;
+  const pos = document.getElementById('posSelect').value;
+  const stat = document.getElementById('posStatSelect').value;
+  const filterText = (document.getElementById('posFilter').value || '').toLowerCase();
+  if (!pos) return;
+
+  let rows = buildPositionSeasonRows(pos, stat);
+  rows = rows.filter(r => state.seasons.some(s => hasMeaningfulValue(r[`total_${s}`])));
+  if (filterText) rows = rows.filter(r => (r.full_name || '').toLowerCase().includes(filterText));
+
+  // +/- vs the position's league average for this stat, per season
+  const leagueAvgBySeason = {};
+  state.seasons.forEach(s => { leagueAvgBySeason[s] = computeLeagueWeekAverages(pos, stat, s).overallAvg; });
+  rows.forEach(r => {
+    state.seasons.forEach(s => {
+      const la = leagueAvgBySeason[s];
+      r[`diff_${s}`] = (r[`avg_${s}`] != null && la != null) ? +(r[`avg_${s}`] - la).toFixed(2) : null;
+    });
+  });
+
+  // opportunity rank & success-rate rank vs position peers, per season
+  const oppSuccessBySeason = {};
+  const poolNotes = [];
+  state.seasons.forEach(s => {
+    oppSuccessBySeason[s] = computeOpportunityAndSuccess(pos, s);
+    poolNotes.push(`${s}: ${oppSuccessBySeason[s].oppPoolSize} qualifying ${pos}s (min ${oppSuccessBySeason[s].minQualifyingOpp} for Success Rank)`);
+  });
+  rows.forEach(r => {
+    state.seasons.forEach(s => {
+      const data = oppSuccessBySeason[s];
+      r[`opprank_${s}`] = data.oppRankMap.get(r.player_id) || null;
+      r[`successrank_${s}`] = data.successRankMap.get(r.player_id) || null;
+    });
+  });
+  const oppFieldsLabel = OPPORTUNITY_LABELS[pos] || 'volume';
+  document.getElementById('posOpportunityNote').textContent =
+    `Opportunity = ${oppFieldsLabel}. Success Rate = fantasy points earned per opportunity ` +
+    `(Success Rank only among players with at least half the position's median volume, to avoid tiny-sample flukes). ` +
+    `Rank 1 = best. ${poolNotes.join(' · ')}.`;
+
+  const latestSeason = state.seasons[state.seasons.length - 1];
+  if (!posSortState.key) posSortState.key = `total_${latestSeason}`;
+  rows = [...rows].sort((a, b) => ((Number(a[posSortState.key]) || 0) - (Number(b[posSortState.key]) || 0)) * posSortState.dir);
+
+  const cols = ['full_name', 'team',
+    ...state.seasons.map(s => `total_${s}`),
+    ...state.seasons.map(s => `avg_${s}`),
+    ...state.seasons.map(s => `diff_${s}`),
+    ...state.seasons.map(s => `opprank_${s}`),
+    ...state.seasons.map(s => `successrank_${s}`)];
+  const posLabels = {};
+  state.seasons.forEach(s => {
+    posLabels[`diff_${s}`] = `+/- Lg Avg ${s}`;
+    posLabels[`opprank_${s}`] = `Opp Rank ${s}`;
+    posLabels[`successrank_${s}`] = `Success Rank ${s}`;
+  });
+  renderTable('posTable', rows, cols, stat, true, { sortState: posSortState, onSort: renderPositionTab, labels: posLabels });
+
+  document.getElementById('posChartLabel').textContent = statLabel(stat);
+  const top = [...rows].sort((a, b) => {
+    const bSum = state.seasons.reduce((acc, s) => acc + (Number(b[`total_${s}`]) || 0), 0);
+    const aSum = state.seasons.reduce((acc, s) => acc + (Number(a[`total_${s}`]) || 0), 0);
+    return bSum - aSum;
+  }).slice(0, 15);
+  drawBarChart('posChart', top.map(r => r.full_name),
+    top.map(r => state.seasons.reduce((acc, s) => acc + (Number(r[`total_${s}`]) || 0), 0)));
+
+  renderPositionWeeklyMatrix(pos, stat, filterText);
+}
+
+function renderPositionWeeklyMatrix(pos, stat, filterText) {
+  document.getElementById('posWeeklyLabel').textContent = `${statLabel(stat)} — ${pos}`;
+  const table = document.getElementById('posWeeklyTable');
+  table.innerHTML = '';
+  if (!pos) return;
+
+  const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  ['Player', 'Season', ...weeks.map(w => 'W' + w), 'Avg'].forEach(label => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const posWeekly = state.weekly.filter(r => r.position === pos);
+
+  const byPlayerSeason = new Map();
+  posWeekly.forEach(r => {
+    const key = `${r.player_id}|${r.season}`;
+    if (!byPlayerSeason.has(key)) {
+      byPlayerSeason.set(key, { player_id: r.player_id, season: r.season, full_name: r.full_name, weeksArr: new Array(18).fill(null) });
+    }
+    const entry = byPlayerSeason.get(key);
+    const wIdx = Number(r.week) - 1;
+    if (wIdx >= 0 && wIdx < 18) entry.weeksArr[wIdx] = numOrNull(r[stat]);
+  });
+
+  const seasonTotalsLookup = new Map();
+  state.seasonTotals.filter(r => r.position === pos).forEach(r => {
+    seasonTotalsLookup.set(`${r.player_id}|${r.season}`, { gp: Number(r.gp) || 0, total: Number(r[stat]) || 0 });
+  });
+
+  function computeAvg(key, weeksArr) {
+    const lookup = seasonTotalsLookup.get(key);
+    if (lookup && lookup.gp > 0) return +(lookup.total / lookup.gp).toFixed(2);
+    const played = weeksArr.filter(v => v !== null);
+    if (!played.length) return null;
+    return +(played.reduce((a, b) => a + b, 0) / played.length).toFixed(2);
+  }
+
+  let entries = [...byPlayerSeason.values()];
+  entries = entries.filter(e => {
+    const lookup = seasonTotalsLookup.get(`${e.player_id}|${e.season}`);
+    const seasonHasData = lookup && hasMeaningfulValue(lookup.total);
+    const weeklyHasData = e.weeksArr.some(v => hasMeaningfulValue(v));
+    return seasonHasData || weeklyHasData;
+  });
+  if (filterText) entries = entries.filter(e => (e.full_name || '').toLowerCase().includes(filterText));
+  entries.sort((a, b) => (a.full_name || '').localeCompare(b.full_name || '') || String(a.season).localeCompare(String(b.season)));
+
+  const tbody = document.createElement('tbody');
+
+  // position-wide average rows, one per season, pinned at the top
+  state.seasons.forEach(season => {
+    const { weekAverages, overallAvg } = computeLeagueWeekAverages(pos, stat, season);
+
+    const tr = document.createElement('tr');
+    tr.className = 'league-avg-row';
+    const cells = [`Position Avg — ${pos}`, season, ...weekAverages.map(fmt), fmt(overallAvg)];
+    cells.forEach((val, i) => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  entries.forEach(entry => {
+    const key = `${entry.player_id}|${entry.season}`;
+    const avg = computeAvg(key, entry.weeksArr);
+    const tr = document.createElement('tr');
+    const cells = [entry.full_name, entry.season, ...entry.weeksArr.map(fmt), fmt(avg)];
+    cells.forEach((val, i) => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+}
+
+
+function renderTable(tableId, rows, cols, highlightStat, sortable, opts) {
+  opts = opts || {};
+  const sortState = opts.sortState || posSortState;
+  const onSort = opts.onSort || renderPositionTab;
+  const labels = opts.labels || {};
+
+  const table = document.getElementById(tableId);
+  table.innerHTML = '';
+  if (!rows.length) {
+    table.innerHTML = `<tr><td class="empty-note">No rows match.</td></tr>`;
+    return;
+  }
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(c => {
+    const th = document.createElement('th');
+    th.textContent = labels[c] || (['full_name','team','position'].includes(c) ? statLabel(c==='full_name'?'player':c) : statLabel(c));
+    if (sortable) {
+      th.addEventListener('click', () => {
+        if (sortState.key === c) sortState.dir *= -1; else { sortState.key = c; sortState.dir = -1; }
+        onSort();
+      });
+      th.classList.toggle('sorted', sortState.key === c && sortState.dir === -1);
+      th.classList.toggle('sorted-asc', sortState.key === c && sortState.dir === 1);
+    }
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      if (c === 'position') { td.innerHTML = `<span class="pos-tag">${r[c]||''}</span>`; }
+      else td.textContent = fmt(r[c]);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+}
+
+/* ==========================================================================
+   PLAYER TAB
+========================================================================== */
+const searchInput = document.getElementById('playerSearch');
+const suggestBox = document.getElementById('playerSuggest');
+
+searchInput.addEventListener('input', () => {
+  const q = searchInput.value.trim().toLowerCase();
+  if (q.length < 2) { suggestBox.style.display = 'none'; return; }
+  const matches = [...state.players.values()]
+    .filter(p => p.full_name.toLowerCase().includes(q))
+    .slice(0, 20);
+  suggestBox.innerHTML = '';
+  if (!matches.length) { suggestBox.style.display = 'none'; return; }
+  matches.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'suggest-item';
+    div.innerHTML = `${p.full_name} <small>${p.position} · ${p.team}</small>`;
+    div.addEventListener('click', () => {
+      searchInput.value = p.full_name;
+      suggestBox.style.display = 'none';
+      state.selectedPlayerId = p.player_id;
+      renderPlayerDetail(p.player_id);
+    });
+    suggestBox.appendChild(div);
+  });
+  suggestBox.style.display = 'block';
+});
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.player-search-wrap')) suggestBox.style.display = 'none';
+});
+
+function renderPlayerDetail(playerId) {
+  const p = state.players.get(playerId);
+  const container = document.getElementById('playerDetail');
+  if (!p) { container.innerHTML = `<div class="empty-note">Player not found.</div>`; return; }
+
+  const totals = state.seasonTotals.filter(r => r.player_id === playerId);
+  const weekly = state.weekly.filter(r => r.player_id === playerId);
+
+  // only keep stats that have a real (non-null, non-zero) value in at least one loaded season
+  const seasonRowsAligned = state.seasons.map(season => totals.find(r => String(r.season) === String(season)));
+  const visibleStats = state.statColumns.filter(s => seasonRowsAligned.some(r => r && hasMeaningfulValue(r[s])));
+
+  let html = `
+    <div class="player-header">
+      <h2>${p.full_name}</h2>
+      <span class="pos-tag">${p.position}</span>
+      <span class="team-tag">${p.team}</span>
+    </div>
+    <div class="season-cards">`;
+
+  state.seasons.forEach(season => {
+    const row = totals.find(r => String(r.season) === String(season));
+    html += `<div class="season-card"><h5>${season} Season Totals</h5><div class="stat-grid">`;
+    if (row) {
+      visibleStats.forEach(s => {
+        html += `<div class="k">${statLabel(s)}</div><div class="v">${fmt(row[s])}</div>`;
+      });
+      if (!visibleStats.length) html += `<div class="k">No recorded stats</div><div class="v"></div>`;
+    } else {
+      html += `<div class="k">No data for this season</div><div class="v"></div>`;
+    }
+    html += `</div></div>`;
+  });
+  html += `</div>`;
+
+  html += `
+    <div class="chart-card">
+      <h4>Weekly Trend &mdash; <span id="playerWeeklyLabel"></span></h4>
+      <div class="chart-box"><canvas id="playerYearLineChart"></canvas></div>
+      <div class="table-scroll" style="margin-top:14px;"><table id="playerWeeklyTable"></table></div>
+    </div>
+    <div class="mini-grid" id="miniGrid"></div>`;
+  container.innerHTML = html;
+
+  // weekly year-row matrix for the currently selected stat (Player tab's "Weekly Stat" dropdown)
+  const stat = document.getElementById('playerStatSelect').value;
+  try { renderPlayerWeeklyMatrix(playerId, stat); } catch (err) { console.error('Player weekly matrix failed:', err); }
+
+  // mini trend chart per stat (only for stats with real data, matching visibleStats)
+  try {
+    const { labels, keyIndex } = buildTimeline();
+    const grid = document.getElementById('miniGrid');
+    visibleStats.forEach((s, i) => {
+      const data = new Array(labels.length).fill(null);
+      let hasData = false;
+      weekly.forEach(r => {
+        const idx = keyIndex[`${r.season}-${r.week}`];
+        const val = numOrNull(r[s]);
+        if (idx !== undefined) { data[idx] = val; if (val !== null) hasData = true; }
+      });
+      if (!hasData) return;
+      const card = document.createElement('div');
+      card.className = 'mini-chart-card';
+      const canvasId = `mini_${s}`;
+      card.innerHTML = `<h5>${statLabel(s)}</h5><div class="chart-box" style="height:130px;"><canvas id="${canvasId}"></canvas></div>`;
+      grid.appendChild(card);
+      drawLineChart(canvasId, labels, [{
+        label: statLabel(s), data, borderColor: PALETTE[i % PALETTE.length],
+        backgroundColor: 'rgba(111,191,106,0.08)', fill:true, spanGaps:false, tension:.3, pointRadius:1.5
+      }], true);
+    });
+  } catch (err) { console.error('Mini-chart grid failed:', err); }
+}
+
+function renderPlayerWeeklyMatrix(playerId, stat) {
+  const p = state.players.get(playerId);
+  document.getElementById('playerWeeklyLabel').textContent = `${statLabel(stat)} — ${p ? p.full_name : ''}`;
+  const table = document.getElementById('playerWeeklyTable');
+  table.innerHTML = '';
+
+  const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  ['Season', ...weeks.map(w => 'W' + w), 'Avg', 'Lg Avg', '+/-'].forEach(label => {
+    const th = document.createElement('th');
+    th.textContent = label;
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  const weeklyForPlayer = state.weekly.filter(r => r.player_id === playerId);
+  const seasonTotalsForPlayer = state.seasonTotals.filter(r => r.player_id === playerId);
+
+  const chartDatasets = [];
+  let anyRow = false;
+  state.seasons.forEach((season, i) => {
+    const weeksArr = new Array(18).fill(null);
+    weeklyForPlayer.filter(r => String(r.season) === String(season)).forEach(r => {
+      const idx = Number(r.week) - 1;
+      if (idx >= 0 && idx < 18) weeksArr[idx] = numOrNull(r[stat]);
+    });
+
+    const seasonRow = seasonTotalsForPlayer.find(r => String(r.season) === String(season));
+    const gp = seasonRow ? Number(seasonRow.gp) || 0 : 0;
+    const total = seasonRow ? Number(seasonRow[stat]) || 0 : 0;
+    let avg = null;
+    if (gp > 0) avg = +(total / gp).toFixed(2);
+    else {
+      const played = weeksArr.filter(v => v !== null);
+      if (played.length) avg = +(played.reduce((a, b) => a + b, 0) / played.length).toFixed(2);
+    }
+
+    // skip a season row entirely if there's no meaningful data for this stat that year
+    const seasonHasData = hasMeaningfulValue(total) || weeksArr.some(v => hasMeaningfulValue(v));
+    if (!seasonHasData) return;
+    anyRow = true;
+
+    // league (position) average for this stat/season, and the +/- vs this player
+    const leagueAvg = p ? computeLeagueWeekAverages(p.position, stat, season).overallAvg : null;
+    const diff = (avg !== null && leagueAvg !== null) ? +(avg - leagueAvg).toFixed(2) : null;
+
+    const tr = document.createElement('tr');
+    const plainCells = [season, ...weeksArr.map(fmt), fmt(avg), fmt(leagueAvg)];
+    plainCells.forEach(val => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      tr.appendChild(td);
+    });
+    const diffTd = document.createElement('td');
+    diffTd.textContent = fmtDiff(diff);
+    if (diff !== null) diffTd.style.color = diff > 0 ? 'var(--turf-bright)' : (diff < 0 ? 'var(--alert)' : 'var(--muted)');
+    diffTd.style.fontWeight = '700';
+    tr.appendChild(diffTd);
+    tbody.appendChild(tr);
+
+    chartDatasets.push({
+      label: String(season), data: weeksArr, borderColor: PALETTE[i % PALETTE.length],
+      backgroundColor: 'transparent', spanGaps: false, tension: .25, pointRadius: 3
+    });
+  });
+
+  table.appendChild(tbody);
+  if (!anyRow) {
+    table.innerHTML += `<tr><td class="empty-note">No data for this stat in any loaded season.</td></tr>`;
+  }
+
+  drawLineChart('playerYearLineChart', weeks.map(w => 'W' + w), chartDatasets);
+}
+
+/* ==========================================================================
+   CHARTS
+========================================================================== */
+function chartLibReady(canvasId) {
+  if (typeof Chart === 'undefined') {
+    const el = document.getElementById(canvasId);
+    if (el && el.parentElement) {
+      el.parentElement.insertAdjacentHTML('beforeend',
+        '<div class="empty-note">Chart library failed to load (check your internet connection / ad blocker) — try refreshing the page.</div>');
+    }
+    return false;
+  }
+  return true;
+}
+
+function drawLineChart(canvasId, labels, datasets, mini) {
+  if (!chartLibReady(canvasId)) return;
+  destroyChart(canvasId);
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode:'index', intersect:false },
+      plugins: {
+        legend: { display: !mini, labels: { color: '#8ea394', font: { family:'Inter', size:11 } } },
+        tooltip: { backgroundColor:'#182420', titleColor:'#d1a54d', bodyColor:'#eef2ee', borderColor:'#28372f', borderWidth:1 }
+      },
+      scales: {
+        x: { ticks: { color:'#8ea394', font:{size: mini?8:10}, maxRotation:0, autoSkip:true, maxTicksLimit: mini?6:18 }, grid:{color:'#1d2b25'} },
+        y: { ticks: { color:'#8ea394', font:{size: mini?9:11} }, grid:{color:'#1d2b25'} }
+      }
+    }
+  });
+}
+
+function drawBarChart(canvasId, labels, data) {
+  if (!chartLibReady(canvasId)) return;
+  destroyChart(canvasId);
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{ data, backgroundColor:'#4c8c4a', borderRadius:3 }] },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend:{display:false}, tooltip:{ backgroundColor:'#182420', titleColor:'#d1a54d', bodyColor:'#eef2ee' } },
+      scales: {
+        x: { ticks:{color:'#8ea394'}, grid:{color:'#1d2b25'} },
+        y: { ticks:{color:'#eef2ee', font:{size:11}}, grid:{display:false} }
+      }
+    }
+  });
+}
+
+function drawGroupedBarChart(canvasId, labels, datasets, unitSuffix) {
+  if (!chartLibReady(canvasId)) return;
+  destroyChart(canvasId);
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  const ctx = el.getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8ea394', font: { family: 'Inter', size: 11 } } },
+        tooltip: {
+          backgroundColor: '#182420', titleColor: '#d1a54d', bodyColor: '#eef2ee',
+          callbacks: { label: (ctx) => `${ctx.dataset.label}: ${ctx.parsed.x}${unitSuffix || ''}` }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#8ea394' }, grid: { color: '#1d2b25' } },
+        y: { ticks: { color: '#eef2ee', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  loadRepositoryData();
+});
+  
+</script>
+</body>
+
+</html>
