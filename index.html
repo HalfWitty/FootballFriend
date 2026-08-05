@@ -393,16 +393,18 @@ async function loadRepositoryData() {
     'Loading <b>repository data...</b>';
 
   let loadedCount = 0;
+  const cacheBust = Date.now(); // forces a fresh fetch each page load, bypassing browser/CDN caches
 
   for (const filePath of REPOSITORY_FILES) {
     try {
-      const response = await fetch(filePath);
+      const response = await fetch(`${filePath}?v=${cacheBust}`, { cache: 'no-store' });
 
       // A missing optional file should not stop the app.
       if (!response.ok) {
         console.warn(
           `Could not load ${filePath}: ${response.status}`
         );
+        addChip(`${filePath.split('/').pop()} (HTTP ${response.status})`, false);
         continue;
       }
 
