@@ -312,7 +312,7 @@
         </select>
       </div>
     </div>
-    <select id="playerStatSelect" style="display:none;"></select>
+    <div id="playerStatHolder" style="display:none;"><select id="playerStatSelect"></select></div>
     <div id="playerDetail"><div class="empty-note">Search for a player above to see their full stat breakdown.</div></div>
   </div>
 
@@ -1483,6 +1483,11 @@ function renderPlayerDetail(playerId) {
   const container = document.getElementById('playerDetail');
   if (!p) { container.innerHTML = `<div class="empty-note">Player not found.</div>`; return; }
 
+  // park the persistent select back in its safe holder BEFORE wiping container's
+  // innerHTML - otherwise, once it's parented inside container from a prior render,
+  // this innerHTML reset would destroy it and every dropdown afterward would crash.
+  document.getElementById('playerStatHolder').appendChild(document.getElementById('playerStatSelect'));
+
   const totals = state.seasonTotals.filter(r => r.player_id === playerId);
   const mode = (document.getElementById('playerModeSelect').value) || 'total';
 
@@ -1701,7 +1706,7 @@ function populateCompareControls() {
 function populateComparePlayerSelects() {
   const pos = document.getElementById('cmpPosSelect').value;
   const players = [...state.players.values()]
-    .filter(p => p.position === pos && p.full_name && p.full_name !== 'Unknown Player')
+    .filter(p => p.position === pos && p.full_name && p.full_name !== 'Unknown Player' && p.team && p.team !== 'FA')
     .sort((a, b) => a.full_name.localeCompare(b.full_name));
   [1, 2, 3].forEach(n => {
     const sel = document.getElementById(`cmpPlayer${n}`);
@@ -1717,6 +1722,20 @@ function populateComparePlayerSelects() {
   });
 }
 
+// build a combined week timeline across just the comparison years (2024-2026),
+// e.g. "'24 W1", "'24 W2", ... "'26 W18" - mirrors buildTimeline() but scoped down.
+function buildCompareTimeline() {
+  const labels = [];
+  const keyIndex = {};
+  COMPARE_YEARS.filter(y => state.seasons.map(String).includes(y)).forEach(season => {
+    for (let w = 1; w <= 18; w++) {
+      keyIndex[`${season}-${w}`] = labels.length;
+      labels.push(`'${season.slice(-2)} W${w}`);
+    }
+  });
+  return { labels, keyIndex };
+}
+
 function renderCompareTab() {
   const container = document.getElementById('compareDetail');
   const pos = document.getElementById('cmpPosSelect').value;
@@ -1727,15 +1746,10 @@ function renderCompareTab() {
   }
   const players = ids.map(id => state.players.get(id)).filter(Boolean);
 
-  // any stat with meaningful season-total data for at least one selected player
+  // any stat with meaningful weekly data (in 2024-2026) for at least one selected player
   const relevantStats = state.statColumns.filter(stat =>
-    players.some(p => state.seasonTotals.some(r => r.player_id === p.player_id && hasMeaningfulValue(r[stat])))
+    players.some(p => state.weekly.some(r => r.player_id === p.player_id && COMPARE_YEARS.includes(String(r.season)) && hasMeaningfulValue(r[stat])))
   );
-
-  // reference season for the bar charts: most recent season with data among the selected players
-  const barSeason = [...state.seasons].reverse().find(s =>
-    players.some(p => state.seasonTotals.some(r => r.player_id === p.player_id && String(r.season) === String(s)))
-  ) || state.seasons[state.seasons.length - 1];
 
   container.innerHTML = `<div class="player-header">
       <h2>Player Comparison</h2>
@@ -1748,21 +1762,27 @@ function renderCompareTab() {
     return;
   }
 
+  const { labels: tlabels, keyIndex } = buildCompareTimeline();
+  const colors = players.map((p, i) => PALETTE[i % PALETTE.length]);
+
   relevantStats.forEach(stat => {
     const card = document.createElement('div');
     card.className = 'chart-card';
     const canvasId = `cmp_${stat}`;
-    card.innerHTML = `<h4>${statLabel(stat)} <span>(${barSeason} totals)</span></h4>
-      <div class="chart-box short"><canvas id="${canvasId}"></canvas></div>
+    card.innerHTML = `<h4>${statLabel(stat)} <span>(weekly, '24&ndash;'26)</span></h4>
+      <div class="chart-box tall"><canvas id="${canvasId}"></canvas></div>
       <div class="table-scroll" style="margin-top:10px;"><table id="cmpTable_${stat}"></table></div>`;
     container.appendChild(card);
 
-    const values = players.map(p => {
-      const row = state.seasonTotals.find(r => r.player_id === p.player_id && String(r.season) === String(barSeason));
-      return row ? (numOrNull(row[stat]) || 0) : 0;
+    const datasets = players.map((p, i) => {
+      const data = new Array(tlabels.length).fill(null);
+      state.weekly.filter(r => r.player_id === p.player_id && COMPARE_YEARS.includes(String(r.season))).forEach(r => {
+        const idx = keyIndex[`${r.season}-${r.week}`];
+        if (idx !== undefined) data[idx] = numOrNull(r[stat]);
+      });
+      return { label: p.full_name, data, backgroundColor: colors[i], borderRadius: 2 };
     });
-    const colors = players.map((p, i) => PALETTE[i % PALETTE.length]);
-    drawBarChart(canvasId, players.map(p => p.full_name), values, colors);
+    drawVerticalGroupedBarChart(canvasId, tlabels, datasets);
 
     // median table for 2024 / 2025 / 2026
     const table = document.getElementById(`cmpTable_${stat}`);
@@ -1836,6 +1856,31 @@ function drawBarChart(canvasId, labels, data, colors) {
       scales: {
         x: { ticks:{color:'#8ea394'}, grid:{color:'#1d2b25'} },
         y: { ticks:{color:'#eef2ee', font:{size:11}}, grid:{display:false} }
+      }
+    }
+  });
+}
+
+// vertical grouped bars: weeks along the x-axis, one bar per player per week
+function drawVerticalGroupedBarChart(canvasId, labels, datasets) {
+  if (!chartLibReady(canvasId)) return;
+  destroyChart(canvasId);
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  const ctx = el.getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8ea394', font: { family: 'Inter', size: 11 } } },
+        tooltip: { backgroundColor: '#182420', titleColor: '#d1a54d', bodyColor: '#eef2ee', borderColor: '#28372f', borderWidth: 1 }
+      },
+      scales: {
+        x: { ticks: { color: '#8ea394', font: { size: 9 }, maxRotation: 0, autoSkip: true, maxTicksLimit: 20 }, grid: { color: '#1d2b25' } },
+        y: { ticks: { color: '#8ea394' }, grid: { color: '#1d2b25' } }
       }
     }
   });
