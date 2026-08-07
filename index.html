@@ -294,6 +294,11 @@
       <h4>Weekly Breakdown &mdash; <span id="posWeeklyLabel"></span></h4>
       <div class="table-scroll" style="max-height:520px;overflow-y:auto;"><table id="posWeeklyTable"></table></div>
     </div>
+    <div class="chart-card">
+      <h4>Draft ADP &amp; Value &mdash; <span id="posAdpLabel"></span></h4>
+      <p class="empty-note" id="posAdpNote" style="text-align:left;padding:0 0 10px;"></p>
+      <div class="table-scroll" style="max-height:520px;overflow-y:auto;"><table id="posAdpTable"></table></div>
+    </div>
   </div>
 
   <!-- ============ PLAYER PANEL ============ -->
@@ -359,6 +364,10 @@ let state = {
   seasonTotals: [],         // [{player_id, season, ...stats}]
   statColumns: [],          // sorted list of numeric stat field names
   seasons: [],               // sorted list of season values present
+  adp: new Map(),           // "normalizedName|position" -> {name, position, years: {year: {adp, value}}}
+  adpByName: new Map(),     // normalizedName -> [entry, ...] (fallback lookup ignoring position)
+  adpConsolidated: new Map(),      // suffix-merged version of `adp` (handles Jr./Sr./III drift across years)
+  adpConsolidatedByName: new Map(),
   selectedPlayerId: null,
   filesLoaded: []
 };
@@ -427,6 +436,7 @@ const REPOSITORY_FILES = [
   'data/league_2025_transactions.csv',
   'data/league_2025_users.csv',
   'data/league_2026_rosters.csv',
+  'data/ADP_values_2024_2026.csv',
   'data/players_nfl.csv'
 ];
 
@@ -512,6 +522,15 @@ function addChip(name, ok) {
   state.filesLoaded.push(name);
 }
 
+function normalizeName(name) {
+  return String(name || '').toLowerCase().replace(/[.''`]/g, '').replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+}
+// some names pick up/drop a suffix across seasons in these sheets (e.g. "Aaron Jones"
+// in 2024/25 vs "Aaron Jones Sr." in 2026) - stripping it lets those merge together.
+function stripSuffix(nm) {
+  return nm.replace(/\b(jr|sr|ii|iii|iv|v)\.?$/i, '').trim();
+}
+
 function classifyAndStore(filename, rows) {
   if (!rows.length) return;
   const cols = new Set(Object.keys(rows[0]));
@@ -520,7 +539,8 @@ function classifyAndStore(filename, rows) {
   // Prefer filename signal first (our export script names files predictably).
   // Fall back to header/content heuristics for renamed or hand-exported files.
   let kind;
-  if (fname.includes('weekly')) kind = 'weekly';
+  if (fname.includes('adp')) kind = 'adp';
+  else if (fname.includes('weekly')) kind = 'weekly';
   else if (fname.includes('season_total') || fname.includes('season-total') || fname.includes('totals')) kind = 'season';
   else if ((fname.includes('player') && cols.has('full_name') && !cols.has('season'))) kind = 'players';
   else {
@@ -528,7 +548,8 @@ function classifyAndStore(filename, rows) {
     // (Sleeper leaves it blank), so check whether it's actually populated,
     // not just present.
     const weekPopulated = rows.some(r => r.week !== null && r.week !== undefined && r.week !== '');
-    if (cols.has('full_name') && cols.has('position') && !cols.has('season')) kind = 'players';
+    if (cols.has('ADP_2024') || (cols.has('Player') && cols.has('Position') && [...cols].some(c => /^ADP_\d{4}$/.test(c)))) kind = 'adp';
+    else if (cols.has('full_name') && cols.has('position') && !cols.has('season')) kind = 'players';
     else if (cols.has('season') && weekPopulated) kind = 'weekly';
     else if (cols.has('season')) kind = 'season';
     else kind = 'unknown';
@@ -549,6 +570,28 @@ function classifyAndStore(filename, rows) {
     rows.forEach(r => { if (r.player_id != null) state.weekly.push(normalizeRow(r)); });
   } else if (kind === 'season') {
     rows.forEach(r => { if (r.player_id != null) state.seasonTotals.push(normalizeRow(r)); });
+  } else if (kind === 'adp') {
+    rows.forEach(r => {
+      if (!r.Player) return;
+      const nm = normalizeName(r.Player);
+      const key = `${nm}|${r.Position || ''}`;
+      const entry = state.adp.get(key) || { name: r.Player, position: r.Position || '', years: {} };
+      Object.keys(r).forEach(k => {
+        const mAdp = /^ADP_(\d{4})$/.exec(k);
+        const mVal = /^Value_(\d{4})$/.exec(k);
+        if (mAdp) {
+          const yr = mAdp[1];
+          entry.years[yr] = entry.years[yr] || {};
+          entry.years[yr].adp = (r[k] !== null && r[k] !== undefined && r[k] !== '') ? Number(r[k]) : null;
+        }
+        if (mVal) {
+          const yr = mVal[1];
+          entry.years[yr] = entry.years[yr] || {};
+          entry.years[yr].value = (r[k] !== null && r[k] !== undefined && r[k] !== '') ? Number(r[k]) : null;
+        }
+      });
+      state.adp.set(key, entry);
+    });
   }
 }
 
@@ -600,6 +643,39 @@ function finalizeData() {
   const seasonSet = new Set([...state.seasonTotals, ...state.weekly].map(r => r.season));
   state.seasons = [...seasonSet].filter(s => s != null).sort();
 
+  // fallback ADP lookup index (name only, ignoring position - covers cases like
+  // DST naming mismatches between the ADP sheet and the stats/player directory)
+  state.adpByName = new Map();
+  state.adp.forEach(entry => {
+    const nm = normalizeName(entry.name);
+    if (!state.adpByName.has(nm)) state.adpByName.set(nm, []);
+    state.adpByName.get(nm).push(entry);
+  });
+
+  // consolidated (suffix-merged) index - some names pick up/drop a Jr./Sr./III
+  // between years in the sheet, which would otherwise split one player into two
+  // lookup keys and silently lose whichever years landed under the "other" spelling.
+  state.adpConsolidated = new Map();
+  state.adp.forEach(entry => {
+    const base = stripSuffix(normalizeName(entry.name));
+    const key = `${base}|${entry.position}`;
+    const bucket = state.adpConsolidated.get(key) || { name: entry.name, position: entry.position, years: {} };
+    Object.keys(entry.years).forEach(y => {
+      if (!bucket.years[y]) bucket.years[y] = { ...entry.years[y] };
+      else {
+        if (bucket.years[y].adp == null && entry.years[y].adp != null) bucket.years[y].adp = entry.years[y].adp;
+        if (bucket.years[y].value == null && entry.years[y].value != null) bucket.years[y].value = entry.years[y].value;
+      }
+    });
+    state.adpConsolidated.set(key, bucket);
+  });
+  state.adpConsolidatedByName = new Map();
+  state.adpConsolidated.forEach(entry => {
+    const base = stripSuffix(normalizeName(entry.name));
+    if (!state.adpConsolidatedByName.has(base)) state.adpConsolidatedByName.set(base, []);
+    state.adpConsolidatedByName.get(base).push(entry);
+  });
+
   updateStatusLine();
   if (state.seasonTotals.length || state.weekly.length) enableTabs();
   populateAllControls();
@@ -611,6 +687,7 @@ function updateStatusLine() {
   document.getElementById('statusLine').innerHTML =
     `Loaded <b>${state.filesLoaded.length}</b> file(s) &middot; <b>${state.players.size}</b> players in directory &middot; ` +
     `<b>${state.seasonTotals.length}</b> season-total rows &middot; <b>${state.weekly.length}</b> weekly rows &middot; ` +
+    `<b>${state.adp.size}</b> ADP/value entries &middot; ` +
     `seasons: <b>${state.seasons.join(', ') || '—'}</b>`;
 }
 
@@ -1258,6 +1335,7 @@ function renderPositionTab() {
     top.map(r => activeSeasons.reduce((acc, s) => acc + (Number(r[`total_${s}`]) || 0), 0)));
 
   renderPositionWeeklyMatrix(pos, stat, filterText, activeSeasons);
+  renderPositionAdpTable(pos, stat, rows);
 }
 
 function renderPositionWeeklyMatrix(pos, stat, filterText, activeSeasons) {
@@ -1349,6 +1427,145 @@ function renderPositionWeeklyMatrix(pos, stat, filterText, activeSeasons) {
   table.appendChild(tbody);
 }
 
+/* ==========================================================================
+   POSITION TAB — DRAFT ADP & VALUE TABLE
+========================================================================== */
+function getAdpEntryForRow(r) {
+  const base = stripSuffix(normalizeName(r.full_name));
+  const posKey = `${base}|${r.position}`;
+  if (state.adpConsolidated.has(posKey)) return state.adpConsolidated.get(posKey);
+  const list = state.adpConsolidatedByName.get(base);
+  return (list && list.length) ? list[0] : null;
+}
+
+// rank within the position, for one season/stat, using season totals (1 = best)
+function computeStatRankMap(pos, season, stat) {
+  const rowsForPos = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season));
+  const invert = isLowerBetterCol(stat);
+  const withVals = rowsForPos
+    .map(r => ({ player_id: r.player_id, v: numOrNull(r[stat]) }))
+    .filter(x => x.v !== null && hasMeaningfulValue(x.v));
+  withVals.sort((a, b) => invert ? a.v - b.v : b.v - a.v);
+  const map = new Map();
+  withVals.forEach((x, i) => map.set(x.player_id, i + 1));
+  return map;
+}
+
+function renderPositionAdpTable(pos, stat, rows) {
+  document.getElementById('posAdpLabel').textContent = `${pos} · $/${statLabel(stat)} Pt`;
+  const table = document.getElementById('posAdpTable');
+  const note = document.getElementById('posAdpNote');
+  table.innerHTML = '';
+
+  // years found anywhere in the loaded ADP sheet - independent of the position
+  // table's year checkboxes above, since draft data isn't tied to that filter.
+  const adpYears = uniqueSorted([...state.adp.values()].flatMap(e => Object.keys(e.years)));
+  if (!adpYears.length) {
+    note.textContent = 'No ADP/Value data loaded (expects an ADP_values CSV with Player, Position, ADP_YYYY, Value_YYYY columns).';
+    return;
+  }
+  note.textContent = `Draft ADP (avg. draft position) and $ auction Value come from your ADP/value sheet. ` +
+    `Stat Rank and $/Stat Pt use the "${statLabel(stat)}" metric currently selected above (rank 1 = best). ` +
+    `The pinned row shows the position's median draft $ for each year.`;
+
+  const statRankMaps = {};
+  adpYears.forEach(y => { statRankMaps[y] = computeStatRankMap(pos, y, stat); });
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  const headCells = ['Player'];
+  adpYears.forEach(y => headCells.push(`${y} ADP`, `${y} Value`, `${y} Stat Rank`, `${y} $/Stat Pt`));
+  headCells.forEach(h => { const th = document.createElement('th'); th.textContent = h; trh.appendChild(th); });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const dataRows = rows.filter(r => !r._isMedianRow);
+
+  // precompute each row's per-year figures once, so we can both render them and
+  // fold them into the pinned median row below
+  const computed = dataRows.map(r => {
+    const entry = getAdpEntryForRow(r);
+    const perYear = {};
+    adpYears.forEach(y => {
+      const yd = entry ? entry.years[y] : null;
+      const adpVal = yd && yd.adp !== undefined ? yd.adp : null;
+      const valVal = yd && yd.value !== undefined ? yd.value : null;
+      const seasonRow = state.seasonTotals.find(sr => sr.player_id === r.player_id && String(sr.season) === String(y));
+      const statTotal = seasonRow ? numOrNull(seasonRow[stat]) : null;
+      const rank = statRankMaps[y].get(r.player_id) || null;
+      const perPt = (valVal !== null && statTotal !== null && statTotal !== 0) ? +(valVal / statTotal).toFixed(2) : null;
+      perYear[y] = { adp: adpVal, value: valVal, rank, perPt };
+    });
+    return { row: r, perYear };
+  });
+
+  const tbody = document.createElement('tbody');
+
+  // pinned median row (this is the "average draft price" summary, per year)
+  const medianTr = document.createElement('tr');
+  medianTr.className = 'league-avg-row';
+  const medianNameTd = document.createElement('td');
+  medianNameTd.textContent = `Median Draft $ — ${pos}`;
+  medianNameTd.style.textAlign = 'left';
+  medianTr.appendChild(medianNameTd);
+  adpYears.forEach(y => {
+    const vals = computed.map(c => c.perYear[y].value).filter(v => v !== null && v !== undefined);
+    const medVal = median(vals);
+    [null, medVal !== null ? `$${medVal}` : null, null, null].forEach(v => {
+      const td = document.createElement('td');
+      td.textContent = (v === null || v === undefined) ? '—' : v;
+      medianTr.appendChild(td);
+    });
+  });
+  tbody.appendChild(medianTr);
+
+  computed.forEach(({ row: r, perYear }) => {
+    const tr = document.createElement('tr');
+    const nameTd = document.createElement('td');
+    nameTd.textContent = r.full_name;
+    nameTd.style.textAlign = 'left';
+    tr.appendChild(nameTd);
+    adpYears.forEach(y => {
+      const { adp, value, rank, perPt } = perYear[y];
+      [adp, value !== null ? `$${value}` : null, rank, perPt !== null ? `$${perPt}` : null].forEach(v => {
+        const td = document.createElement('td');
+        td.textContent = (v === null || v === undefined) ? '—' : v;
+        tr.appendChild(td);
+      });
+    });
+    tbody.appendChild(tr);
+  });
+
+  table.appendChild(tbody);
+
+  // color the Value / Stat Rank / $-per-pt columns (green = good) per year
+  const colStart = 1;
+  adpYears.forEach((y, yi) => {
+    const base = colStart + yi * 4;
+    [{ offset: 1, invert: false }, { offset: 2, invert: true }, { offset: 3, invert: true }].forEach(({ offset, invert }) => {
+      const colIndex = base + offset;
+      const vals = computed.map(c => {
+        const yd = c.perYear[y];
+        const raw = offset === 1 ? yd.value : (offset === 2 ? yd.rank : yd.perPt);
+        return raw;
+      }).filter(v => v !== null && v !== undefined && !Number.isNaN(v));
+      if (vals.length < 2) return;
+      const min = Math.min(...vals), max = Math.max(...vals);
+      if (min === max) return;
+      computed.forEach((c, ri) => {
+        const yd = c.perYear[y];
+        const raw = offset === 1 ? yd.value : (offset === 2 ? yd.rank : yd.perPt);
+        if (raw === null || raw === undefined || Number.isNaN(raw)) return;
+        let t = (raw - min) / (max - min);
+        if (invert) t = 1 - t;
+        const tr = tbody.children[ri + 1]; // +1 to skip the pinned median row
+        if (!tr) return;
+        const td = tr.children[colIndex];
+        if (td) td.style.backgroundColor = colorFromT(t);
+      });
+    });
+  });
+}
 
 function renderTable(tableId, rows, cols, highlightStat, sortable, opts) {
   opts = opts || {};
