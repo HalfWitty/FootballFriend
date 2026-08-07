@@ -1490,8 +1490,9 @@ function renderPositionAdpTable(pos, stat, rows) {
       const yd = entry ? entry.years[y] : null;
       const adpVal = yd && yd.adp !== undefined ? yd.adp : null;
       const valVal = yd && yd.value !== undefined ? yd.value : null;
-      const seasonRow = state.seasonTotals.find(sr => sr.player_id === r.player_id && String(sr.season) === String(y));
-      const statTotal = seasonRow ? numOrNull(seasonRow[stat]) : null;
+      // use the exact same season TOTAL already computed/shown in the table above
+      // (not a weekly median) so $/Stat Pt always divides by full-season production
+      const statTotal = numOrNull(r[`total_${y}`]);
       const rank = statRankMaps[y].get(r.player_id) || null;
       const perPt = (valVal !== null && statTotal !== null && statTotal !== 0) ? +(valVal / statTotal).toFixed(2) : null;
       perYear[y] = { adp: adpVal, value: valVal, rank, perPt };
