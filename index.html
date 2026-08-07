@@ -295,7 +295,8 @@
       <p class="empty-note" style="text-align:left;padding:0 0 10px;">
         X = percentile of season-total production; Y = percentile of how many weeks a player finished above the
         position's weekly median &ndash; both computed only among players with a non-zero stat that season.
-        With multiple years checked above, each player's point is averaged across the seasons they qualify in.
+        Dot color is the player's average draft $ (from your ADP/value sheet) &ndash; green = cheap, red = expensive.
+        With multiple years checked above, X, Y, and the dot color are all averaged across the seasons they qualify in.
       </p>
       <div class="chart-box tall"><canvas id="posScatterChart"></canvas></div>
     </div>
@@ -1125,7 +1126,7 @@ function isLowerBetterCol(col) {
   return LOWER_IS_BETTER_STATS.has(col) || /rank/i.test(col);
 }
 
-function colorFromT(t) {
+function colorFromT(t, alpha) {
   // 0 = worst (red) -> 0.5 (gold) -> 1 = best (green)
   t = Math.max(0, Math.min(1, t));
   const stops = [[193, 84, 76], [209, 165, 77], [111, 191, 106]];
@@ -1133,7 +1134,7 @@ function colorFromT(t) {
   const r = Math.round(c1[0] + (c2[0] - c1[0]) * f);
   const g = Math.round(c1[1] + (c2[1] - c1[1]) * f);
   const b = Math.round(c1[2] + (c2[2] - c1[2]) * f);
-  return `rgba(${r},${g},${b},0.30)`;
+  return `rgba(${r},${g},${b},${alpha != null ? alpha : 0.30})`;
 }
 
 // Colors a set of table cells column-by-column using each column's own min/max
@@ -1550,7 +1551,13 @@ function buildPositionScatterPoints(pos, stat, activeSeasons) {
     if (!entries.length) return;
     const xAvg = +(entries.reduce((a, e) => a + e.x, 0) / entries.length).toFixed(1);
     const yAvg = +(entries.reduce((a, e) => a + e.y, 0) / entries.length).toFixed(1);
-    points.push({ x: xAvg, y: yAvg, label: `${entries[0].full_name}${entries.length > 1 ? ` (${entries.length}-season avg)` : ''}` });
+    const fullName = entries[0].full_name;
+    const adpEntry = getAdpEntryForRow({ full_name: fullName, position: pos });
+    const costs = activeSeasons
+      .map(s => (adpEntry && adpEntry.years[s] && adpEntry.years[s].value !== null && adpEntry.years[s].value !== undefined) ? adpEntry.years[s].value : null)
+      .filter(v => v !== null);
+    const avgCost = costs.length ? +(costs.reduce((a, b) => a + b, 0) / costs.length).toFixed(2) : null;
+    points.push({ x: xAvg, y: yAvg, label: `${fullName}${entries.length > 1 ? ` (${entries.length}-season avg)` : ''}`, cost: avgCost });
   });
   return points;
 }
@@ -1561,20 +1568,40 @@ function buildPlayerScatterPoints(playerId, position, stat) {
   state.seasons.forEach(season => {
     const map = computeScatterPercentiles(position, season, stat);
     const entry = map.get(playerId);
-    if (entry) points.push({ x: entry.x, y: entry.y, label: String(season) });
+    if (!entry) return;
+    const adpEntry = getAdpEntryForRow({ full_name: entry.full_name, position });
+    const yd = adpEntry ? adpEntry.years[season] : null;
+    const cost = (yd && yd.value !== null && yd.value !== undefined) ? yd.value : null;
+    points.push({ x: entry.x, y: entry.y, label: String(season), cost });
   });
   return points;
+}
+
+// green (cheap) -> gold -> red (expensive) dot color, scaled against the min/max
+// draft $ cost actually present among the points being plotted
+function costColorsForPoints(points) {
+  const costs = points.map(p => p.cost).filter(c => c !== null && c !== undefined);
+  if (!costs.length) return points.map(() => 'rgba(142,163,148,0.55)');
+  const minCost = Math.min(...costs), maxCost = Math.max(...costs);
+  return points.map(p => {
+    if (p.cost === null || p.cost === undefined) return 'rgba(142,163,148,0.55)';
+    if (minCost === maxCost) return colorFromT(0.5, 0.85);
+    const t = 1 - (p.cost - minCost) / (maxCost - minCost); // cheap = green (t=1), expensive = red (t=0)
+    return colorFromT(t, 0.85);
+  });
 }
 
 function renderPositionScatterChart(pos, stat, activeSeasons) {
   const labelEl = document.getElementById('posScatterLabel');
   if (labelEl) labelEl.textContent = `${pos} · ${statLabel(stat)} · ${activeSeasons.join(', ')}`;
   const points = buildPositionScatterPoints(pos, stat, activeSeasons);
-  const dataset = { label: pos, data: points, backgroundColor: 'rgba(111,191,106,0.75)', borderColor: 'rgba(111,191,106,1)', pointRadius: 5, pointHoverRadius: 7 };
+  const colors = costColorsForPoints(points);
+  const dataset = { label: pos, data: points, backgroundColor: colors, borderColor: colors, pointRadius: 5, pointHoverRadius: 7 };
   drawScatterChart('posScatterChart', [dataset], {
     xLabel: 'Volume Percentile (Season Total)',
     yLabel: 'Consistency Percentile (Weeks Above Median)',
-    showLegend: false
+    showLegend: false,
+    showCost: true
   });
 }
 
@@ -1582,22 +1609,25 @@ function renderPlayerScatterChart(playerId, position, stat) {
   const labelEl = document.getElementById('playerScatterLabel');
   if (labelEl) labelEl.textContent = statLabel(stat);
   const points = buildPlayerScatterPoints(playerId, position, stat);
+  const colors = costColorsForPoints(points);
   const dataset = {
     label: 'Season',
     data: points,
     showLine: true,
     borderColor: 'rgba(142,163,148,0.4)',
-    backgroundColor: points.map((_, i) => PALETTE[i % PALETTE.length]),
-    pointBackgroundColor: points.map((_, i) => PALETTE[i % PALETTE.length]),
+    backgroundColor: colors,
+    pointBackgroundColor: colors,
     pointRadius: 7,
     pointHoverRadius: 9
   };
   drawScatterChart('playerScatterChart', [dataset], {
     xLabel: 'Volume Percentile (Season Total)',
     yLabel: 'Consistency Percentile (Weeks Above Median)',
-    showLegend: false
+    showLegend: false,
+    showCost: true
   });
 }
+
 
 
 function renderPositionAdpTable(pos, stat, rows) {
@@ -1974,6 +2004,7 @@ function renderPlayerDetail(playerId) {
       <p class="empty-note" style="text-align:left;padding:0 0 10px;">
         Each point is one season, positioned against that season's full position field: X = season-total percentile,
         Y = percentile of weeks finished above the position's weekly median (non-zero-stat players only).
+        Dot color is that season's draft $ from your ADP/value sheet &ndash; green = cheap, red = expensive.
       </p>
       <div class="chart-box tall"><canvas id="playerScatterChart"></canvas></div>
     </div>
@@ -2291,7 +2322,12 @@ function drawScatterChart(canvasId, datasets, opts) {
           backgroundColor: '#182420', titleColor: '#d1a54d', bodyColor: '#eef2ee', borderColor: '#28372f', borderWidth: 1,
           callbacks: {
             title: (items) => (items[0] && items[0].raw && items[0].raw.label) ? items[0].raw.label : '',
-            label: (item) => `Volume: ${item.raw.x}%ile · Consistency: ${item.raw.y}%ile`
+            label: (item) => {
+              const base = `Volume: ${item.raw.x}%ile · Consistency: ${item.raw.y}%ile`;
+              if (opts.showCost && item.raw.cost !== null && item.raw.cost !== undefined) return `${base} · Draft $${item.raw.cost}`;
+              if (opts.showCost) return `${base} · Draft $: —`;
+              return base;
+            }
           }
         }
       },
