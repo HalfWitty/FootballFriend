@@ -291,6 +291,15 @@
       <div class="chart-box tall"><canvas id="posChart"></canvas></div>
     </div>
     <div class="chart-card">
+      <h4>Volume vs. Consistency &mdash; <span id="posScatterLabel"></span></h4>
+      <p class="empty-note" style="text-align:left;padding:0 0 10px;">
+        X = percentile of season-total production; Y = percentile of how many weeks a player finished above the
+        position's weekly median &ndash; both computed only among players with a non-zero stat that season.
+        With multiple years checked above, each player's point is averaged across the seasons they qualify in.
+      </p>
+      <div class="chart-box tall"><canvas id="posScatterChart"></canvas></div>
+    </div>
+    <div class="chart-card">
       <h4>Weekly Breakdown &mdash; <span id="posWeeklyLabel"></span></h4>
       <div class="table-scroll" style="max-height:520px;overflow-y:auto;"><table id="posWeeklyTable"></table></div>
     </div>
@@ -775,7 +784,11 @@ function populateAllControls() {
 
   fillSelect('playerStatSelect', state.statColumns.map(s => ({v:s, t:statLabel(s)})));
   document.getElementById('playerStatSelect').addEventListener('change', () => {
-    if (state.selectedPlayerId) renderPlayerWeeklyMatrix(state.selectedPlayerId, document.getElementById('playerStatSelect').value);
+    if (!state.selectedPlayerId) return;
+    const stat = document.getElementById('playerStatSelect').value;
+    renderPlayerWeeklyMatrix(state.selectedPlayerId, stat);
+    const p = state.players.get(state.selectedPlayerId);
+    if (p) { try { renderPlayerScatterChart(state.selectedPlayerId, p.position, stat); } catch (err) { console.error('Player scatter chart failed:', err); } }
   });
   document.getElementById('playerModeSelect').addEventListener('change', () => {
     if (state.selectedPlayerId) renderPlayerDetail(state.selectedPlayerId);
@@ -1336,6 +1349,7 @@ function renderPositionTab() {
     top.map(r => activeSeasons.reduce((acc, s) => acc + (Number(r[`total_${s}`]) || 0), 0)));
 
   renderPositionWeeklyMatrix(pos, stat, filterText, activeSeasons);
+  renderPositionScatterChart(pos, stat, activeSeasons);
   renderPositionAdpTable(pos, stat, rows);
 }
 
@@ -1451,6 +1465,140 @@ function computeStatRankMap(pos, season, stat) {
   withVals.forEach((x, i) => map.set(x.player_id, i + 1));
   return map;
 }
+
+// rank-based percentile (0-100), tie-averaged: given [{id, v}, ...], returns Map(id -> percentile)
+function percentileRanks(values) {
+  const n = values.length;
+  const map = new Map();
+  if (!n) return map;
+  const sorted = [...values].sort((a, b) => a.v - b.v);
+  let i = 0;
+  while (i < n) {
+    let j = i;
+    while (j + 1 < n && sorted[j + 1].v === sorted[i].v) j++;
+    const avgIndex = (i + j) / 2;
+    const pct = n > 1 ? +(100 * avgIndex / (n - 1)).toFixed(1) : 50;
+    for (let k = i; k <= j; k++) map.set(sorted[k].id, pct);
+    i = j + 1;
+  }
+  return map;
+}
+
+// single "typical week" threshold for a position/season/stat, built from every
+// weekly value posted by players who finished the season with a non-zero total
+function computeWeeklyMedianThreshold(pos, season, stat, qualifyingIdSet) {
+  const vals = state.weekly
+    .filter(r => r.position === pos && String(r.season) === String(season) && qualifyingIdSet.has(r.player_id))
+    .map(r => numOrNull(r[stat]))
+    .filter(v => v !== null);
+  return median(vals);
+}
+
+// how many weeks each qualifying player finished ABOVE that threshold
+function computeConsistencyCounts(pos, season, stat, qualifyingIdSet, threshold) {
+  const counts = new Map();
+  qualifyingIdSet.forEach(id => counts.set(id, 0));
+  if (threshold === null) return counts;
+  state.weekly
+    .filter(r => r.position === pos && String(r.season) === String(season) && qualifyingIdSet.has(r.player_id))
+    .forEach(r => {
+      const v = numOrNull(r[stat]);
+      if (v !== null && v > threshold) counts.set(r.player_id, (counts.get(r.player_id) || 0) + 1);
+    });
+  return counts;
+}
+
+// X = season-total percentile, Y = consistency (weeks-above-median) percentile,
+// both computed only among players with a non-zero season total for this stat.
+// Returns Map(player_id -> {x, y, total, count, full_name})
+function computeScatterPercentiles(pos, season, stat) {
+  const result = new Map();
+  const seasonRows = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season));
+  const qualifying = seasonRows.filter(r => { const v = numOrNull(r[stat]); return v !== null && v !== 0; });
+  const n = qualifying.length;
+  if (n < 2) return result;
+
+  const qualifyingIdSet = new Set(qualifying.map(r => r.player_id));
+  const xPctMap = percentileRanks(qualifying.map(r => ({ id: r.player_id, v: numOrNull(r[stat]) })));
+
+  const threshold = computeWeeklyMedianThreshold(pos, season, stat, qualifyingIdSet);
+  const counts = computeConsistencyCounts(pos, season, stat, qualifyingIdSet, threshold);
+  const yPctMap = percentileRanks(qualifying.map(r => ({ id: r.player_id, v: counts.get(r.player_id) || 0 })));
+
+  qualifying.forEach(r => {
+    result.set(r.player_id, {
+      x: xPctMap.get(r.player_id),
+      y: yPctMap.get(r.player_id),
+      total: numOrNull(r[stat]),
+      count: counts.get(r.player_id) || 0,
+      full_name: r.full_name
+    });
+  });
+  return result;
+}
+
+// Position tab: one point per player, averaged across whichever seasons are
+// currently checked (only over the seasons where that player actually qualifies)
+function buildPositionScatterPoints(pos, stat, activeSeasons) {
+  const perSeasonMaps = {};
+  activeSeasons.forEach(s => { perSeasonMaps[s] = computeScatterPercentiles(pos, s, stat); });
+  const allIds = new Set();
+  activeSeasons.forEach(s => perSeasonMaps[s].forEach((v, id) => allIds.add(id)));
+  const points = [];
+  allIds.forEach(id => {
+    const entries = activeSeasons.map(s => perSeasonMaps[s].get(id)).filter(Boolean);
+    if (!entries.length) return;
+    const xAvg = +(entries.reduce((a, e) => a + e.x, 0) / entries.length).toFixed(1);
+    const yAvg = +(entries.reduce((a, e) => a + e.y, 0) / entries.length).toFixed(1);
+    points.push({ x: xAvg, y: yAvg, label: `${entries[0].full_name}${entries.length > 1 ? ` (${entries.length}-season avg)` : ''}` });
+  });
+  return points;
+}
+
+// Player tab: one point per season the player has qualifying data for
+function buildPlayerScatterPoints(playerId, position, stat) {
+  const points = [];
+  state.seasons.forEach(season => {
+    const map = computeScatterPercentiles(position, season, stat);
+    const entry = map.get(playerId);
+    if (entry) points.push({ x: entry.x, y: entry.y, label: String(season) });
+  });
+  return points;
+}
+
+function renderPositionScatterChart(pos, stat, activeSeasons) {
+  const labelEl = document.getElementById('posScatterLabel');
+  if (labelEl) labelEl.textContent = `${pos} · ${statLabel(stat)} · ${activeSeasons.join(', ')}`;
+  const points = buildPositionScatterPoints(pos, stat, activeSeasons);
+  const dataset = { label: pos, data: points, backgroundColor: 'rgba(111,191,106,0.75)', borderColor: 'rgba(111,191,106,1)', pointRadius: 5, pointHoverRadius: 7 };
+  drawScatterChart('posScatterChart', [dataset], {
+    xLabel: 'Volume Percentile (Season Total)',
+    yLabel: 'Consistency Percentile (Weeks Above Median)',
+    showLegend: false
+  });
+}
+
+function renderPlayerScatterChart(playerId, position, stat) {
+  const labelEl = document.getElementById('playerScatterLabel');
+  if (labelEl) labelEl.textContent = statLabel(stat);
+  const points = buildPlayerScatterPoints(playerId, position, stat);
+  const dataset = {
+    label: 'Season',
+    data: points,
+    showLine: true,
+    borderColor: 'rgba(142,163,148,0.4)',
+    backgroundColor: points.map((_, i) => PALETTE[i % PALETTE.length]),
+    pointBackgroundColor: points.map((_, i) => PALETTE[i % PALETTE.length]),
+    pointRadius: 7,
+    pointHoverRadius: 9
+  };
+  drawScatterChart('playerScatterChart', [dataset], {
+    xLabel: 'Volume Percentile (Season Total)',
+    yLabel: 'Consistency Percentile (Weeks Above Median)',
+    showLegend: false
+  });
+}
+
 
 function renderPositionAdpTable(pos, stat, rows) {
   document.getElementById('posAdpLabel').textContent = `${pos} · $/${statLabel(stat)} Pt`;
@@ -1821,6 +1969,14 @@ function renderPlayerDetail(playerId) {
       </div>
       <div class="table-scroll" style="margin-top:14px;"><table id="playerWeeklyTable"></table></div>
     </div>
+    <div class="chart-card">
+      <h4>Volume vs. Consistency by Season &mdash; <span id="playerScatterLabel"></span></h4>
+      <p class="empty-note" style="text-align:left;padding:0 0 10px;">
+        Each point is one season, positioned against that season's full position field: X = season-total percentile,
+        Y = percentile of weeks finished above the position's weekly median (non-zero-stat players only).
+      </p>
+      <div class="chart-box tall"><canvas id="playerScatterChart"></canvas></div>
+    </div>
     <div class="mini-grid" id="miniGrid"></div>`;
   container.innerHTML = html;
 
@@ -1832,6 +1988,7 @@ function renderPlayerDetail(playerId) {
   // weekly year-row matrix for the currently selected stat
   const stat = statSelect.value;
   try { renderPlayerWeeklyMatrix(playerId, stat); } catch (err) { console.error('Player weekly matrix failed:', err); }
+  try { renderPlayerScatterChart(playerId, p.position, stat); } catch (err) { console.error('Player scatter chart failed:', err); }
 
   // mini trend chart per stat (only for stats with real data, matching visibleStats)
   try {
@@ -2112,6 +2269,40 @@ function drawBarChart(canvasId, labels, data, colors) {
     }
   });
 }
+
+// volume-vs-consistency percentile scatter (Position tab: one point per player;
+// Player tab: one point per season for a single player)
+function drawScatterChart(canvasId, datasets, opts) {
+  opts = opts || {};
+  if (!chartLibReady(canvasId)) return;
+  destroyChart(canvasId);
+  const el = document.getElementById(canvasId);
+  if (!el) return;
+  const ctx = el.getContext('2d');
+  charts[canvasId] = new Chart(ctx, {
+    type: 'scatter',
+    data: { datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: !!opts.showLegend, labels: { color: '#8ea394', font: { family: 'Inter', size: 11 } } },
+        tooltip: {
+          backgroundColor: '#182420', titleColor: '#d1a54d', bodyColor: '#eef2ee', borderColor: '#28372f', borderWidth: 1,
+          callbacks: {
+            title: (items) => (items[0] && items[0].raw && items[0].raw.label) ? items[0].raw.label : '',
+            label: (item) => `Volume: ${item.raw.x}%ile · Consistency: ${item.raw.y}%ile`
+          }
+        }
+      },
+      scales: {
+        x: { min: 0, max: 100, title: { display: true, text: opts.xLabel || 'Volume Percentile', color: '#8ea394' }, ticks: { color: '#8ea394' }, grid: { color: '#1d2b25' } },
+        y: { min: 0, max: 100, title: { display: true, text: opts.yLabel || 'Consistency Percentile', color: '#8ea394' }, ticks: { color: '#8ea394' }, grid: { color: '#1d2b25' } }
+      }
+    }
+  });
+}
+
 
 // vertical grouped bars: weeks along the x-axis, one bar per player per week
 function drawVerticalGroupedBarChart(canvasId, labels, datasets) {
