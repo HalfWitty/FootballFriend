@@ -258,7 +258,7 @@
     </div>
 
     <div class="chart-card">
-      <h4>Pass/Run Tendency &amp; Schedule &mdash; <span id="teamScheduleLabel"></span> <span style="color:var(--muted);font-size:13px;">(2024&ndash;2025 only)</span></h4>
+      <h4>Pass/Run Tendency &amp; Schedule &mdash; <span id="teamScheduleLabel"></span> <span style="color:var(--muted);font-size:13px;">(2024&ndash;2025 actuals, 2026 actual + projected)</span></h4>
       <div class="status-line" id="teamPassMedianLine" style="margin-bottom:10px;"></div>
       <div class="table-scroll" style="max-height:460px;overflow-y:auto;"><table id="teamScheduleTable"></table></div>
     </div>
@@ -378,6 +378,7 @@ let state = {
   adpByName: new Map(),     // normalizedName -> [entry, ...] (fallback lookup ignoring position)
   adpConsolidated: new Map(),      // suffix-merged version of `adp` (handles Jr./Sr./III drift across years)
   adpConsolidatedByName: new Map(),
+  schedule: new Map(),       // team -> Map(week -> {opponent, home_away, date}) - future/full-season schedule (e.g. 2026)
   selectedPlayerId: null,
   filesLoaded: []
 };
@@ -447,6 +448,7 @@ const REPOSITORY_FILES = [
   'data/league_2025_users.csv',
   'data/league_2026_rosters.csv',
   'data/ADP_values_2024_2026.csv',
+  'data/stats_2026_schedule.csv',
   'data/players_nfl.csv'
 ];
 
@@ -550,6 +552,7 @@ function classifyAndStore(filename, rows) {
   // Fall back to header/content heuristics for renamed or hand-exported files.
   let kind;
   if (fname.includes('adp')) kind = 'adp';
+  else if (fname.includes('schedule')) kind = 'schedule';
   else if (fname.includes('weekly')) kind = 'weekly';
   else if (fname.includes('season_total') || fname.includes('season-total') || fname.includes('totals')) kind = 'season';
   else if ((fname.includes('player') && cols.has('full_name') && !cols.has('season'))) kind = 'players';
@@ -559,6 +562,7 @@ function classifyAndStore(filename, rows) {
     // not just present.
     const weekPopulated = rows.some(r => r.week !== null && r.week !== undefined && r.week !== '');
     if (cols.has('ADP_2024') || (cols.has('Player') && cols.has('Position') && [...cols].some(c => /^ADP_\d{4}$/.test(c)))) kind = 'adp';
+    else if (cols.has('team') && cols.has('week') && cols.has('opponent') && !cols.has('player_id')) kind = 'schedule';
     else if (cols.has('full_name') && cols.has('position') && !cols.has('season')) kind = 'players';
     else if (cols.has('season') && weekPopulated) kind = 'weekly';
     else if (cols.has('season')) kind = 'season';
@@ -601,6 +605,18 @@ function classifyAndStore(filename, rows) {
         }
       });
       state.adp.set(key, entry);
+    });
+  } else if (kind === 'schedule') {
+    rows.forEach(r => {
+      if (!r.team || r.week == null || r.week === '') return;
+      const team = String(r.team).trim();
+      const week = Number(r.week);
+      if (!state.schedule.has(team)) state.schedule.set(team, new Map());
+      state.schedule.get(team).set(week, {
+        opponent: r.opponent || null,
+        home_away: r.home_away || '',
+        date: r.date || ''
+      });
     });
   }
 }
@@ -976,9 +992,12 @@ function renderShareCharts(team) {
 }
 
 // ---- pass/run tendency by week + opponent (matchup context) ----
-// Scoped to 2024-2025 only, per request (schedule/tendency data isn't tracked for
-// 2022-2023 or 2026 seasons).
-const SCHEDULE_SEASONS = ['2024', '2025'];
+// 2024-2025 use actual weekly data throughout. 2026 uses actual data for any
+// week that's already been played; any week without data yet falls back to a
+// projection built from the team's own 2024-2025 tendency, adjusted by how
+// much passing/rushing that week's opponent's defense has historically faced.
+const SCHEDULE_SEASONS = ['2024', '2025', '2026'];
+const SCHEDULE_HISTORY_SEASONS = ['2024', '2025']; // seasons used as the projection baseline
 
 // League-wide weekly pass% by team, plus a reverse index of what pass% opponents'
 // OFFENSES have historically put up against each team's defense ("opp opposition").
@@ -986,7 +1005,7 @@ const SCHEDULE_SEASONS = ['2024', '2025'];
 function computeLeaguePassPctIndex() {
   const hasPassAtt = state.statColumns.includes('pass_att');
   const hasRushAtt = state.statColumns.includes('rush_att');
-  const byTeamSeasonWeek = {}; // team -> season -> week -> {pct, opp}
+  const byTeamSeasonWeek = {}; // team -> season -> week -> {pct, opp, passAtt, rushAtt}
   const defFaced = {};          // defenseTeam -> season -> [pct, ...] (pass% thrown AT them)
   if (!hasPassAtt || !hasRushAtt) return { byTeamSeasonWeek, defFaced };
 
@@ -1016,6 +1035,112 @@ function computeLeaguePassPctIndex() {
   return { byTeamSeasonWeek, defFaced };
 }
 
+// 2024-2025 baseline for projecting weeks that haven't been played yet:
+// each team's own median pass/rush attempts, each opponent's median pass/rush
+// attempts ALLOWED (i.e. what other offenses have done against them), the
+// league-wide average attempts per game, and - per team+opponent - what that
+// team itself did in its actual 2024/2025 games against that specific opponent.
+function computeScheduleProjectionBaselines() {
+  const teamAttempts = {};    // team -> {pass:[...], rush:[...]} (every game, all opponents)
+  const allowedAttempts = {}; // defenseTeam -> {pass:[...], rush:[...]} (what opponents did against them)
+  const matchupHistory = {};  // team -> opponent -> season -> {pass, rush} (that team's own attempts in games vs that opponent that season)
+  const leaguePass = [], leagueRush = [];
+
+  const teams = uniqueSorted(state.weekly.map(r => r.team).filter(t => t && t !== 'FA'));
+  teams.forEach(team => {
+    const teamRows = weeklyRowsForTeam(team);
+    teamAttempts[team] = { pass: [], rush: [] };
+    matchupHistory[team] = {};
+    SCHEDULE_HISTORY_SEASONS.forEach(season => {
+      const perOpponentThisSeason = {}; // opponent -> {pass:[...], rush:[...]} (in case of 2 division games)
+      for (let w = 1; w <= 18; w++) {
+        const wkRows = teamRows.filter(r => String(r.season) === season && Number(r.week) === w);
+        if (!wkRows.length) continue;
+        const passAtt = wkRows.reduce((a, r) => a + (numOrNull(r.pass_att) || 0), 0);
+        const rushAtt = wkRows.reduce((a, r) => a + (numOrNull(r.rush_att) || 0), 0);
+        if (!passAtt && !rushAtt) continue;
+        teamAttempts[team].pass.push(passAtt);
+        teamAttempts[team].rush.push(rushAtt);
+        leaguePass.push(passAtt);
+        leagueRush.push(rushAtt);
+        const oppRow = wkRows.find(r => r.opponent && r.opponent !== '');
+        const opp = oppRow ? oppRow.opponent : null;
+        if (opp) {
+          allowedAttempts[opp] = allowedAttempts[opp] || { pass: [], rush: [] };
+          allowedAttempts[opp].pass.push(passAtt);
+          allowedAttempts[opp].rush.push(rushAtt);
+
+          perOpponentThisSeason[opp] = perOpponentThisSeason[opp] || { pass: [], rush: [] };
+          perOpponentThisSeason[opp].pass.push(passAtt);
+          perOpponentThisSeason[opp].rush.push(rushAtt);
+        }
+      }
+      Object.keys(perOpponentThisSeason).forEach(opp => {
+        const d = perOpponentThisSeason[opp];
+        const avg = arr => arr.reduce((a, b) => a + b, 0) / arr.length;
+        matchupHistory[team][opp] = matchupHistory[team][opp] || {};
+        matchupHistory[team][opp][season] = { pass: avg(d.pass), rush: avg(d.rush) };
+      });
+    });
+  });
+
+  const leagueAvgPass = leaguePass.length ? leaguePass.reduce((a, b) => a + b, 0) / leaguePass.length : null;
+  const leagueAvgRush = leagueRush.length ? leagueRush.reduce((a, b) => a + b, 0) / leagueRush.length : null;
+
+  return { teamAttempts, allowedAttempts, matchupHistory, leagueAvgPass, leagueAvgRush };
+}
+
+// How much to nudge a projection based on the team's OWN history against this
+// specific opponent: if they were above their own baseline in every available
+// matchup season (2024 and 2025, when both exist), scale up by the average of
+// those seasons' ratios; if below in every available season, scale down the
+// same way. A mixed signal (above one year, below the other) is treated as no
+// clear pattern and doesn't move the projection. A single season of matchup
+// data is applied at half strength, since one game is a much thinner sample.
+function matchupAdjustmentFactor(team, opponent, metric, baselineValue, matchupHistory) {
+  const hist = matchupHistory[team] && matchupHistory[team][opponent];
+  if (!hist || !baselineValue) return 1;
+  const seasonsWithData = SCHEDULE_HISTORY_SEASONS.filter(s => hist[s]);
+  if (!seasonsWithData.length) return 1;
+  const ratios = seasonsWithData.map(s => hist[s][metric] / baselineValue);
+  if (seasonsWithData.length === 1) return 1 + 0.5 * (ratios[0] - 1);
+  const allAbove = ratios.every(r => r > 1);
+  const allBelow = ratios.every(r => r < 1);
+  if (allAbove || allBelow) return ratios.reduce((a, b) => a + b, 0) / ratios.length;
+  return 1;
+}
+
+// Projects a team's pass/rush attempts (and pass%) for a given opponent. Blends
+// two 2024-2025-based adjustments around the team's own median attempts:
+// (1) how much passing/rushing that opponent's defense has historically faced
+//     relative to the league average, and
+// (2) how that team itself has performed specifically against that opponent
+//     (only applied when the direction is consistent across both matchup seasons).
+function projectWeekStats(team, opponent, baselines) {
+  const { teamAttempts, allowedAttempts, matchupHistory, leagueAvgPass, leagueAvgRush } = baselines;
+  const teamBase = teamAttempts[team];
+  const oppAllowed = allowedAttempts[opponent];
+  if (!teamBase || !teamBase.pass.length || !leagueAvgPass || !leagueAvgRush) return null;
+
+  const baselinePass = median(teamBase.pass);
+  const baselineRush = median(teamBase.rush);
+  if (baselinePass === null || baselineRush === null) return null;
+
+  const defPassFactor = (oppAllowed && oppAllowed.pass.length) ? (median(oppAllowed.pass) / leagueAvgPass) : 1;
+  const defRushFactor = (oppAllowed && oppAllowed.rush.length) ? (median(oppAllowed.rush) / leagueAvgRush) : 1;
+
+  const matchupPassFactor = matchupAdjustmentFactor(team, opponent, 'pass', baselinePass, matchupHistory);
+  const matchupRushFactor = matchupAdjustmentFactor(team, opponent, 'rush', baselineRush, matchupHistory);
+
+  const passFactor = (defPassFactor + matchupPassFactor) / 2;
+  const rushFactor = (defRushFactor + matchupRushFactor) / 2;
+
+  const projPass = Math.max(0, baselinePass * passFactor);
+  const projRush = Math.max(0, baselineRush * rushFactor);
+  const projPct = (projPass + projRush) > 0 ? +(100 * projPass / (projPass + projRush)).toFixed(1) : null;
+  return { passAtt: +projPass.toFixed(1), rushAtt: +projRush.toFixed(1), pct: projPct };
+}
+
 function renderTeamScheduleTable(team) {
   document.getElementById('teamScheduleLabel').textContent = team;
   const table = document.getElementById('teamScheduleTable');
@@ -1023,15 +1148,19 @@ function renderTeamScheduleTable(team) {
 
   const { byTeamSeasonWeek, defFaced } = computeLeaguePassPctIndex();
   const teamData = byTeamSeasonWeek[team] || {};
+  const baselines = computeScheduleProjectionBaselines();
+  const teamSchedule = state.schedule.get(team) || new Map();
 
-  // ---- median pass% summary line (2024 & 2025) ----
+  // ---- median pass% summary line (2024 & 2025 actuals only) ----
   const medianLine = document.getElementById('teamPassMedianLine');
-  const medianParts = SCHEDULE_SEASONS.map(season => {
+  const medianParts = SCHEDULE_HISTORY_SEASONS.map(season => {
     const vals = Object.values(teamData[season] || {}).map(d => d.pct).filter(v => v !== null && v !== undefined);
     const m = median(vals);
     return `<b>${season}:</b> ${m !== null ? m + '%' : '—'}`;
   });
-  medianLine.innerHTML = `Median Pass % &mdash; ${medianParts.join(' &nbsp;|&nbsp; ')}`;
+  medianLine.innerHTML = `Median Pass % &mdash; ${medianParts.join(' &nbsp;|&nbsp; ')}` +
+    (teamSchedule.size ? ` &nbsp;|&nbsp; <span style="color:#e8973f;">orange text = projected 2026 week</span> ` +
+      `<span style="color:var(--muted);">(2024-25 baseline, adjusted for opponent's defense faced + this team's own history vs. that opponent)</span>` : '');
 
   const thead = document.createElement('thead');
   const trh = document.createElement('tr');
@@ -1046,42 +1175,67 @@ function renderTeamScheduleTable(team) {
   const tbody = document.createElement('tbody');
   let anyRow = false;
 
-  SCHEDULE_SEASONS.forEach(season => {
+  const addRow = (season, w, opponent, passAtt, rushAtt, passPct, isProjected) => {
+    anyRow = true;
+    // Opp Def Median Pass %: blend actual data for that opponent across all
+    // available seasons (2026 actuals + 2024-2025 history) so it's meaningful
+    // even early in a season with little 2026 data yet.
+    const defList = (opponent && opponent !== '—' && defFaced[opponent])
+      ? [].concat(...SCHEDULE_SEASONS.map(s => defFaced[opponent][s] || []))
+      : [];
+    const defMedian = defList.length ? median(defList) : null;
+
+    const tr = document.createElement('tr');
+    if (isProjected) tr.className = 'projected-row';
+    const cells = [season, w, opponent || '—', fmt(passAtt), fmt(rushAtt),
+      passPct !== null ? passPct + '%' : '—',
+      defMedian !== null ? defMedian + '%' : '—'];
+    cells.forEach(val => {
+      const td = document.createElement('td');
+      td.textContent = val;
+      if (isProjected) td.style.color = '#e8973f';
+      tr.appendChild(td);
+    });
+
+    // Coloring: compare the opponent's-opposition median pass% against THIS team's
+    // pass% that week (actual or projected). Opp Def column: defMedian < teamPct
+    // -> red, else green. Team Pass % column gets the opposite coloring.
+    if (defMedian !== null && passPct !== null) {
+      const defIsLower = defMedian < passPct;
+      tr.children[6].style.backgroundColor = colorFromT(defIsLower ? 0 : 1);
+      tr.children[5].style.backgroundColor = colorFromT(defIsLower ? 1 : 0);
+    }
+
+    tbody.appendChild(tr);
+  };
+
+  SCHEDULE_HISTORY_SEASONS.forEach(season => {
     const weeks = teamData[season] || {};
     for (let w = 1; w <= 18; w++) {
       const d = weeks[w];
       if (!d) continue;
-      anyRow = true;
-      const passPct = d.pct;
-      const opponent = d.opp || '—';
-      const defList = (opponent !== '—' && defFaced[opponent]) ? defFaced[opponent][season] : null;
-      const defMedian = defList ? median(defList) : null;
-
-      const tr = document.createElement('tr');
-      const cells = [season, w, opponent, fmt(d.passAtt), fmt(d.rushAtt),
-        passPct !== null ? passPct + '%' : '—',
-        defMedian !== null ? defMedian + '%' : '—'];
-      cells.forEach(val => {
-        const td = document.createElement('td');
-        td.textContent = val;
-        tr.appendChild(td);
-      });
-
-      // Coloring: compare the opponent's-opposition median pass% against THIS team's
-      // actual pass% that week. Opp Def column: defMedian < teamWeekPct -> red, else green.
-      // Team Pass % column gets the opposite coloring.
-      if (defMedian !== null && passPct !== null) {
-        const defIsLower = defMedian < passPct;
-        tr.children[6].style.backgroundColor = colorFromT(defIsLower ? 0 : 1);
-        tr.children[5].style.backgroundColor = colorFromT(defIsLower ? 1 : 0);
-      }
-
-      tbody.appendChild(tr);
+      addRow(season, w, d.opp, d.passAtt, d.rushAtt, d.pct, false);
     }
   });
 
+  // ---- 2026: actual data where it exists, projected where it doesn't ----
+  const season2026 = '2026';
+  const actual2026 = teamData[season2026] || {};
+  for (let w = 1; w <= 18; w++) {
+    const actual = actual2026[w];
+    if (actual) {
+      addRow(season2026, w, actual.opp, actual.passAtt, actual.rushAtt, actual.pct, false);
+      continue;
+    }
+    const sched = teamSchedule.get(w);
+    if (!sched || !sched.opponent || sched.opponent === 'BYE') continue; // no game / bye week
+    const proj = projectWeekStats(team, sched.opponent, baselines);
+    if (!proj) continue; // not enough history to project (e.g. brand-new team code)
+    addRow(season2026, w, sched.opponent, proj.passAtt, proj.rushAtt, proj.pct, true);
+  }
+
   table.appendChild(tbody);
-  if (!anyRow) table.innerHTML += `<tr><td class="empty-note">No 2024-2025 weekly data for this team.</td></tr>`;
+  if (!anyRow) table.innerHTML += `<tr><td class="empty-note">No schedule or weekly data available for this team.</td></tr>`;
 }
 
 function numOrNull(v) { return (v === null || v === undefined || v === '') ? null : Number(v); }
