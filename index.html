@@ -297,6 +297,7 @@
         position's weekly median &ndash; both computed only among players with a non-zero stat that season.
         Dot color is the player's average draft $ (from your ADP/value sheet) &ndash; green = cheap, red = expensive.
         With multiple years checked above, X, Y, and the dot color are all averaged across the seasons they qualify in.
+        2026 uses real weeks where they exist and a projection for the rest of the season otherwise.
       </p>
       <div class="chart-box tall"><canvas id="posScatterChart"></canvas></div>
     </div>
@@ -641,6 +642,8 @@ function normalizeRow(r) {
 }
 
 function finalizeData() {
+  resetProjectionCaches();
+
   // fill in any stats rows missing name/pos/team from the players map
   [...state.weekly, ...state.seasonTotals].forEach(r => {
     let p = state.players.get(r.player_id);
@@ -665,9 +668,15 @@ function finalizeData() {
   const rest = [...statSet].filter(s => !PRIORITY_STATS.includes(s)).sort();
   state.statColumns = [...PRIORITY_STATS.filter(s => statSet.has(s)), ...rest];
 
-  // derive season list
-  const seasonSet = new Set([...state.seasonTotals, ...state.weekly].map(r => r.season));
-  state.seasons = [...seasonSet].filter(s => s != null).sort();
+  // derive season list. Normalized to strings throughout - dynamicTyping on the
+  // CSV parser turns real season values into numbers (e.g. 2024), which would
+  // otherwise sit as a separate Set entry from the string '2026' we add below
+  // for schedule-only projections, producing a duplicate season column.
+  // 2026 is included as soon as a schedule is loaded (even with zero real stat
+  // rows yet) so projections can appear from week 1.
+  const seasonSet = new Set([...state.seasonTotals, ...state.weekly].map(r => String(r.season)));
+  if (state.schedule.size) seasonSet.add(PROJECTION_SEASON);
+  state.seasons = [...seasonSet].filter(s => s != null && s !== 'null' && s !== 'undefined').sort();
 
   // fallback ADP lookup index (name only, ignoring position - covers cases like
   // DST naming mismatches between the ADP sheet and the stats/player directory)
@@ -1141,6 +1150,238 @@ function projectWeekStats(team, opponent, baselines) {
   return { passAtt: +projPass.toFixed(1), rushAtt: +projRush.toFixed(1), pct: projPct };
 }
 
+/* ==========================================================================
+   2026 PLAYER PROJECTIONS
+   Builds a per-player weekly projection for any 2026 week that doesn't have
+   real data yet, so Player/Position tabs and the volume-vs-consistency chart
+   can show a full season immediately, with real data taking over week by week
+   as it's loaded. Reuses the team-level schedule projection engine above for
+   opponent-adjusted pass/rush volume, then layers on:
+     - the player's own historical SHARE of that team volume (for opportunity
+       stats: targets, carries, attempts), and
+     - a defense-adjusted + opponent-matchup-adjusted baseline (for every other
+       stat: yardage, touchdowns, efficiency, etc.)
+========================================================================== */
+const PROJECTION_SEASON = '2026';
+
+function computePlayerProjectionContext() {
+  const playerBaseline = {};      // pid -> stat -> median (2024-2025, their own weeks)
+  const playerShare = {};         // pid -> stat -> median share of team's weekly total (opportunity stats only)
+  const playerMatchup = {};       // pid -> opponent -> season -> stat -> avg value in that season's game(s) vs opponent
+  const posAllowed = {};          // "position|opponent|stat" -> [values,...] (2024-2025)
+  const posLeagueAvg = {};        // "position|stat" -> league-wide average per game, 2024-2025
+  const teamWeeklyStatTotal = {}; // "team|season|week|stat" -> summed team total that week (for share calc)
+
+  const oppStatSet = new Set();
+  Object.values(OPPORTUNITY_FIELDS).forEach(arr => arr.forEach(s => oppStatSet.add(s)));
+
+  const teams = uniqueSorted(state.weekly.map(r => r.team).filter(t => t && t !== 'FA'));
+  teams.forEach(team => {
+    const rows = weeklyRowsForTeam(team);
+    SCHEDULE_HISTORY_SEASONS.forEach(season => {
+      for (let w = 1; w <= 18; w++) {
+        const wk = rows.filter(r => String(r.season) === season && Number(r.week) === w);
+        if (!wk.length) continue;
+        oppStatSet.forEach(stat => {
+          const sum = wk.reduce((a, r) => a + (numOrNull(r[stat]) || 0), 0);
+          teamWeeklyStatTotal[`${team}|${season}|${w}|${stat}`] = sum;
+        });
+      }
+    });
+  });
+
+  const players = [...state.players.values()].filter(p => p.player_id && !String(p.player_id).startsWith('TEAM_'));
+  players.forEach(p => {
+    const pid = p.player_id;
+    const rows2425 = state.weekly.filter(r => r.player_id === pid && SCHEDULE_HISTORY_SEASONS.includes(String(r.season)));
+    if (!rows2425.length) return;
+
+    const baseline = {};
+    state.statColumns.forEach(stat => {
+      const vals = rows2425.map(r => numOrNull(r[stat])).filter(v => v !== null);
+      if (vals.length) baseline[stat] = median(vals);
+    });
+    playerBaseline[pid] = baseline;
+
+    const oppFields = OPPORTUNITY_FIELDS[p.position] || [];
+    if (oppFields.length) {
+      const shareMap = {};
+      oppFields.forEach(stat => {
+        const shares = [];
+        rows2425.forEach(r => {
+          const teamTotal = teamWeeklyStatTotal[`${r.team}|${r.season}|${r.week}|${stat}`];
+          const v = numOrNull(r[stat]);
+          if (teamTotal && v !== null) shares.push(v / teamTotal);
+        });
+        if (shares.length) shareMap[stat] = median(shares);
+      });
+      playerShare[pid] = shareMap;
+    }
+
+    const matchup = {};
+    SCHEDULE_HISTORY_SEASONS.forEach(season => {
+      const byOpp = {};
+      rows2425.filter(r => String(r.season) === season).forEach(r => {
+        if (!r.opponent) return;
+        (byOpp[r.opponent] = byOpp[r.opponent] || []).push(r);
+      });
+      Object.keys(byOpp).forEach(opp => {
+        matchup[opp] = matchup[opp] || {};
+        matchup[opp][season] = {};
+        state.statColumns.forEach(stat => {
+          const vals = byOpp[opp].map(r => numOrNull(r[stat])).filter(v => v !== null);
+          if (vals.length) matchup[opp][season][stat] = vals.reduce((a, b) => a + b, 0) / vals.length;
+        });
+      });
+    });
+    playerMatchup[pid] = matchup;
+  });
+
+  FANTASY_POSITIONS.forEach(pos => {
+    const posRows = state.weekly.filter(r => r.position === pos && SCHEDULE_HISTORY_SEASONS.includes(String(r.season)));
+    state.statColumns.forEach(stat => {
+      const allVals = [];
+      posRows.forEach(r => {
+        const v = numOrNull(r[stat]);
+        if (v === null) return;
+        allVals.push(v);
+        if (r.opponent) {
+          const key = `${pos}|${r.opponent}|${stat}`;
+          (posAllowed[key] = posAllowed[key] || []).push(v);
+        }
+      });
+      if (allVals.length) posLeagueAvg[`${pos}|${stat}`] = allVals.reduce((a, b) => a + b, 0) / allVals.length;
+    });
+  });
+
+  return { playerBaseline, playerShare, playerMatchup, posAllowed, posLeagueAvg };
+}
+
+// Same "consistent direction across both matchup seasons" logic used for the
+// team-level schedule projections above, generalized to any subject/stat.
+function genericMatchupFactor(historyForOpponent, stat, baselineValue) {
+  if (!historyForOpponent || !baselineValue) return 1;
+  const seasonsWithData = SCHEDULE_HISTORY_SEASONS.filter(s => historyForOpponent[s] && historyForOpponent[s][stat] != null);
+  if (!seasonsWithData.length) return 1;
+  const ratios = seasonsWithData.map(s => historyForOpponent[s][stat] / baselineValue);
+  if (seasonsWithData.length === 1) return 1 + 0.5 * (ratios[0] - 1);
+  const allAbove = ratios.every(r => r > 1);
+  const allBelow = ratios.every(r => r < 1);
+  if (allAbove || allBelow) return ratios.reduce((a, b) => a + b, 0) / ratios.length;
+  return 1;
+}
+
+// Projects one player's full stat line for one 2026 week. null if there's no
+// schedule/opponent that week (bye, or no schedule loaded for their team) or
+// no 2024-2025 history to project from.
+function projectPlayerWeek(player, week, ctx, teamBaselines) {
+  const pid = player.player_id;
+  const team = player.team;
+  if (!team || team === 'FA') return null;
+  const teamSched = state.schedule.get(team);
+  const weekSched = teamSched && teamSched.get(week);
+  if (!weekSched || !weekSched.opponent || weekSched.opponent === 'BYE') return null;
+  const opponent = weekSched.opponent;
+
+  const baseline = ctx.playerBaseline[pid];
+  if (!baseline) return null;
+
+  const teamProj = projectWeekStats(team, opponent, teamBaselines);
+  const oppFields = OPPORTUNITY_FIELDS[player.position] || [];
+  const share = ctx.playerShare[pid] || {};
+  const matchupForOpp = (ctx.playerMatchup[pid] || {})[opponent];
+
+  const row = {
+    player_id: pid, season: PROJECTION_SEASON, week, team, opponent,
+    position: player.position, full_name: player.full_name, gp: 1, _projected: true
+  };
+
+  let anyValue = false;
+  state.statColumns.forEach(stat => {
+    let val = null;
+    if (oppFields.includes(stat) && share[stat] != null && teamProj) {
+      const teamPool = (stat === 'rush_att') ? teamProj.rushAtt : teamProj.passAtt;
+      if (teamPool != null) val = teamPool * share[stat];
+    } else if (baseline[stat] != null) {
+      const leagueAvg = ctx.posLeagueAvg[`${player.position}|${stat}`];
+      const allowedVals = ctx.posAllowed[`${player.position}|${opponent}|${stat}`];
+      const defFactor = (allowedVals && allowedVals.length && leagueAvg) ? (median(allowedVals) / leagueAvg) : 1;
+      const matchupFactor = genericMatchupFactor(matchupForOpp, stat, baseline[stat]);
+      const factor = (defFactor + matchupFactor) / 2;
+      val = baseline[stat] * Math.max(0, factor);
+    }
+    if (val !== null) { val = +val.toFixed(2); anyValue = true; }
+    row[stat] = val;
+  });
+
+  return anyValue ? row : null;
+}
+
+const _playerSeasonProjectionCache = new Map();
+function getPlayerSeason2026Rows(player, ctx, teamBaselines) {
+  if (_playerSeasonProjectionCache.has(player.player_id)) return _playerSeasonProjectionCache.get(player.player_id);
+  const rows = [];
+  for (let w = 1; w <= 18; w++) {
+    const actual = state.weekly.find(r => r.player_id === player.player_id && String(r.season) === PROJECTION_SEASON && Number(r.week) === w);
+    if (actual) { rows.push({ ...actual, _projected: false }); continue; }
+    const proj = projectPlayerWeek(player, w, ctx, teamBaselines);
+    if (proj) rows.push(proj);
+  }
+  _playerSeasonProjectionCache.set(player.player_id, rows);
+  return rows;
+}
+
+// Builds (and caches) the blended 2026 "effective" weekly + season-total
+// arrays - every player's real data plus a projection for any remaining week -
+// shaped exactly like state.weekly / state.seasonTotals rows so every existing
+// chart/table can consume them without special-casing.
+let _effectiveWeekly2026 = null;
+let _effectiveSeasonTotals2026 = null;
+function buildEffective2026Data() {
+  if (_effectiveWeekly2026) return { weekly: _effectiveWeekly2026, seasonTotals: _effectiveSeasonTotals2026 };
+  const ctx = computePlayerProjectionContext();
+  const teamBaselines = computeScheduleProjectionBaselines();
+  const weekly = [];
+  const seasonTotals = [];
+  const players = [...state.players.values()].filter(p => p.player_id && !String(p.player_id).startsWith('TEAM_'));
+  players.forEach(p => {
+    if (!state.schedule.has(p.team)) return; // no schedule loaded for this team -> nothing to project
+    const rows = getPlayerSeason2026Rows(p, ctx, teamBaselines);
+    if (!rows.length) return;
+    weekly.push(...rows);
+    const totalRow = {
+      player_id: p.player_id, season: PROJECTION_SEASON, position: p.position, team: p.team,
+      full_name: p.full_name, gp: rows.length, _hasProjection: rows.some(r => r._projected)
+    };
+    state.statColumns.forEach(stat => {
+      if (stat === 'gp') return; // gp is set explicitly above (weeks represented) - it's not a per-week stat to sum
+      const vals = rows.map(r => numOrNull(r[stat])).filter(v => v !== null);
+      totalRow[stat] = vals.length ? +vals.reduce((a, b) => a + b, 0).toFixed(2) : 0;
+    });
+    seasonTotals.push(totalRow);
+  });
+  _effectiveWeekly2026 = weekly;
+  _effectiveSeasonTotals2026 = seasonTotals;
+  return { weekly, seasonTotals };
+}
+
+function resetProjectionCaches() {
+  _playerSeasonProjectionCache.clear();
+  _effectiveWeekly2026 = null;
+  _effectiveSeasonTotals2026 = null;
+}
+
+// Drop-in replacements for state.seasonTotals / state.weekly that fold the
+// 2026 projections in behind any real data already loaded for that season.
+function effectiveSeasonTotals() {
+  const { seasonTotals } = buildEffective2026Data();
+  return [...state.seasonTotals.filter(r => String(r.season) !== PROJECTION_SEASON), ...seasonTotals];
+}
+function effectiveWeeklyForSeason(season) {
+  if (String(season) !== PROJECTION_SEASON) return state.weekly.filter(r => String(r.season) === String(season));
+  return buildEffective2026Data().weekly;
+}
+
 function renderTeamScheduleTable(team) {
   document.getElementById('teamScheduleLabel').textContent = team;
   const table = document.getElementById('teamScheduleTable');
@@ -1247,7 +1488,7 @@ function hasMeaningfulValue(v) {
 
 function computeLeagueWeekAverages(position, stat, season) {
   const weeks = Array.from({ length: 18 }, (_, i) => i + 1);
-  const rows = state.weekly.filter(r => r.position === position && String(r.season) === String(season));
+  const rows = effectiveWeeklyForSeason(season).filter(r => r.position === position);
   const weekAverages = weeks.map(w => {
     const vals = rows.filter(r => Number(r.week) === w).map(r => numOrNull(r[stat])).filter(v => v !== null);
     return vals.length ? +(vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(2) : null;
@@ -1343,7 +1584,7 @@ const POINTS_FIELDS_PRIORITY = ['pts_ppr', 'pts_half_ppr', 'pts_std'];
 function computeOpportunityAndSuccess(pos, season) {
   const fields = OPPORTUNITY_FIELDS[pos] || [];
   const pointsField = POINTS_FIELDS_PRIORITY.find(f => state.statColumns.includes(f));
-  const rows = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season) && (Number(r.gp) || 0) > 0);
+  const rows = effectiveSeasonTotals().filter(r => r.position === pos && String(r.season) === String(season) && (Number(r.gp) || 0) > 0);
 
   const computed = rows.map(r => {
     const opportunity = fields.reduce((sum, f) => sum + (numOrNull(r[f]) || 0), 0);
@@ -1375,7 +1616,7 @@ function computeOpportunityAndSuccess(pos, season) {
 }
 
 function buildPositionSeasonRows(pos, stat) {
-  const rowsForPos = state.seasonTotals.filter(r => r.position === pos);
+  const rowsForPos = effectiveSeasonTotals().filter(r => r.position === pos);
   const byPlayer = new Map();
   rowsForPos.forEach(r => {
     if (!byPlayer.has(r.player_id)) {
@@ -1388,6 +1629,7 @@ function buildPositionSeasonRows(pos, stat) {
     entry[`gp_${season}`] = gp;
     entry[`total_${season}`] = total;
     entry[`avg_${season}`] = gp > 0 ? +(total / gp).toFixed(2) : null;
+    entry[`proj_${season}`] = !!r._hasProjection;
     entry.team = r.team || entry.team; // prefer most recently seen team
   });
   return [...byPlayer.values()];
@@ -1439,7 +1681,8 @@ function renderPositionTab() {
   document.getElementById('posOpportunityNote').textContent =
     `Opportunity = ${oppFieldsLabel}. Success Rate = fantasy points earned per opportunity ` +
     `(Success Rank only among players with at least half the position's median volume, to avoid tiny-sample flukes). ` +
-    `Rank 1 = best. ${poolNotes.join(' · ')}. Median row shows the league median for each column; +/- Med shows each player's gap from it.`;
+    `Rank 1 = best. ${poolNotes.join(' · ')}. Median row shows the league median for each column; +/- Med shows each player's gap from it.` +
+    (activeSeasons.includes(PROJECTION_SEASON) ? ` Orange 2026 figures still include a projection and will update as real weeks load.` : '');
 
   // median (across currently displayed rows) for the total/avg columns, per season,
   // plus each row's +/- vs that median
@@ -1493,6 +1736,22 @@ function renderPositionTab() {
     sortState: posSortState, onSort: renderPositionTab, labels: posLabels,
     medianRowCount: 1, colorCols, colorDataRows: rows, colorStartIndex: 2, invertFn: isLowerBetterCol
   });
+
+  // flag any 2026 cells that are still (partly) projected, in orange, on top of
+  // the existing green/red background scale
+  if (activeSeasons.includes(PROJECTION_SEASON)) {
+    const projCols = ['total_2026', 'avg_2026', 'diff_2026', 'medDiff_2026', 'opprank_2026', 'successrank_2026']
+      .map(c => cols.indexOf(c)).filter(i => i >= 0);
+    const tbodyEl = document.querySelector('#posTable tbody');
+    if (tbodyEl) {
+      rows.forEach((r, ri) => {
+        if (!r.proj_2026) return;
+        const tr = tbodyEl.children[ri + 1]; // +1 to skip pinned median row
+        if (!tr) return;
+        projCols.forEach(ci => { if (tr.children[ci]) tr.children[ci].style.color = '#e8973f'; });
+      });
+    }
+  }
 
   document.getElementById('posChartLabel').textContent = statLabel(stat);
   const top = [...rows].sort((a, b) => {
@@ -1610,7 +1869,7 @@ function getAdpEntryForRow(r) {
 
 // rank within the position, for one season/stat, using season totals (1 = best)
 function computeStatRankMap(pos, season, stat) {
-  const rowsForPos = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season));
+  const rowsForPos = effectiveSeasonTotals().filter(r => r.position === pos && String(r.season) === String(season));
   const invert = isLowerBetterCol(stat);
   const withVals = rowsForPos
     .map(r => ({ player_id: r.player_id, v: numOrNull(r[stat]) }))
@@ -1642,8 +1901,8 @@ function percentileRanks(values) {
 // single "typical week" threshold for a position/season/stat, built from every
 // weekly value posted by players who finished the season with a non-zero total
 function computeWeeklyMedianThreshold(pos, season, stat, qualifyingIdSet) {
-  const vals = state.weekly
-    .filter(r => r.position === pos && String(r.season) === String(season) && qualifyingIdSet.has(r.player_id))
+  const vals = effectiveWeeklyForSeason(season)
+    .filter(r => r.position === pos && qualifyingIdSet.has(r.player_id))
     .map(r => numOrNull(r[stat]))
     .filter(v => v !== null);
   return median(vals);
@@ -1654,8 +1913,8 @@ function computeConsistencyCounts(pos, season, stat, qualifyingIdSet, threshold)
   const counts = new Map();
   qualifyingIdSet.forEach(id => counts.set(id, 0));
   if (threshold === null) return counts;
-  state.weekly
-    .filter(r => r.position === pos && String(r.season) === String(season) && qualifyingIdSet.has(r.player_id))
+  effectiveWeeklyForSeason(season)
+    .filter(r => r.position === pos && qualifyingIdSet.has(r.player_id))
     .forEach(r => {
       const v = numOrNull(r[stat]);
       if (v !== null && v > threshold) counts.set(r.player_id, (counts.get(r.player_id) || 0) + 1);
@@ -1668,7 +1927,7 @@ function computeConsistencyCounts(pos, season, stat, qualifyingIdSet, threshold)
 // Returns Map(player_id -> {x, y, total, count, full_name})
 function computeScatterPercentiles(pos, season, stat) {
   const result = new Map();
-  const seasonRows = state.seasonTotals.filter(r => r.position === pos && String(r.season) === String(season));
+  const seasonRows = effectiveSeasonTotals().filter(r => r.position === pos && String(r.season) === String(season));
   const qualifying = seasonRows.filter(r => { const v = numOrNull(r[stat]); return v !== null && v !== 0; });
   const n = qualifying.length;
   if (n < 2) return result;
@@ -2010,14 +2269,14 @@ function renderTable(tableId, rows, cols, highlightStat, sortable, opts) {
 // league (position) median of season TOTALS for one stat/season - used as the
 // "Lg Median" reference column on the Player tab when viewing Totals.
 function computePositionMedianTotal(position, season, stat) {
-  const vals = state.seasonTotals.filter(r => r.position === position && String(r.season) === String(season)).map(r => numOrNull(r[stat]));
+  const vals = effectiveSeasonTotals().filter(r => r.position === position && String(r.season) === String(season)).map(r => numOrNull(r[stat]));
   return median(vals);
 }
 // league (position) median-of-players'-weekly-medians for one stat/season - used
 // as the "Lg Median" reference column on the Player tab when viewing Weekly Median.
 function computePositionMedianOfWeeklyMedians(position, season, stat) {
   const byPlayer = {};
-  state.weekly.filter(r => r.position === position && String(r.season) === String(season)).forEach(r => {
+  effectiveWeeklyForSeason(season).filter(r => r.position === position).forEach(r => {
     (byPlayer[r.player_id] = byPlayer[r.player_id] || []).push(numOrNull(r[stat]));
   });
   const medians = Object.values(byPlayer).map(vals => median(vals)).filter(v => v !== null);
@@ -2058,7 +2317,7 @@ document.addEventListener('click', (e) => {
 
 // median of a player's weekly values for one stat/season
 function playerWeeklyMedian(playerId, season, stat) {
-  const vals = state.weekly.filter(r => r.player_id === playerId && String(r.season) === String(season)).map(r => numOrNull(r[stat]));
+  const vals = effectiveWeeklyForSeason(season).filter(r => r.player_id === playerId).map(r => numOrNull(r[stat]));
   return median(vals);
 }
 
@@ -2072,7 +2331,7 @@ function renderPlayerDetail(playerId) {
   // this innerHTML reset would destroy it and every dropdown afterward would crash.
   document.getElementById('playerStatHolder').appendChild(document.getElementById('playerStatSelect'));
 
-  const totals = state.seasonTotals.filter(r => r.player_id === playerId);
+  const totals = effectiveSeasonTotals().filter(r => r.player_id === playerId);
   const mode = (document.getElementById('playerModeSelect').value) || 'total';
 
   // only keep stats that have a real (non-null, non-zero) value in at least one loaded season
@@ -2088,6 +2347,10 @@ function renderPlayerDetail(playerId) {
       <span class="pos-tag">${p.position}</span>
       <span class="team-tag">${p.team}</span>
     </div>
+    ${state.schedule.size ? `<p class="empty-note" style="text-align:left;padding:6px 0;">
+      <span style="color:#e8973f;">Orange text</span> = 2026 figures still include a projection (based on 2024-2025
+      history, adjusted for this player's opponents and their own history against them) &ndash; they'll be replaced
+      week by week as real 2026 data loads.</p>` : ''}
     <div class="table-scroll" style="margin-top:14px;">
       <table id="playerSeasonTable">
         <thead><tr>
@@ -2114,13 +2377,15 @@ function renderPlayerDetail(playerId) {
     html += `<tr><td style="text-align:left;">${statLabel(stat)}</td>`;
     state.seasons.forEach((season, i) => {
       const v = cellVals[i];
+      const isProj = String(season) === PROJECTION_SEASON &&
+        (totals.find(r => String(r.season) === String(season)) || {})._hasProjection;
       let bg = '';
       if (v !== null && v !== undefined) {
         const poolVals = (mode === 'total'
-          ? state.seasonTotals.filter(r => r.position === p.position && String(r.season) === String(season)).map(r => numOrNull(r[stat]))
+          ? effectiveSeasonTotals().filter(r => r.position === p.position && String(r.season) === String(season)).map(r => numOrNull(r[stat]))
           : (() => {
               const byPl = {};
-              state.weekly.filter(r => r.position === p.position && String(r.season) === String(season)).forEach(r => {
+              effectiveWeeklyForSeason(season).filter(r => r.position === p.position).forEach(r => {
                 (byPl[r.player_id] = byPl[r.player_id] || []).push(numOrNull(r[stat]));
               });
               return Object.values(byPl).map(vs => median(vs));
@@ -2131,11 +2396,12 @@ function renderPlayerDetail(playerId) {
           if (min !== max) {
             let t = (v - min) / (max - min);
             if (invert) t = 1 - t;
-            bg = ` style="background-color:${colorFromT(t)};"`;
+            bg = `background-color:${colorFromT(t)};`;
           }
         }
       }
-      html += `<td${bg}>${fmt(v)}</td>`;
+      const color = isProj ? 'color:#e8973f;' : '';
+      html += `<td${(bg || color) ? ` style="${bg}${color}"` : ''}>${fmt(v)}</td>`;
     });
     html += `<td style="color:var(--gold);font-weight:600;">${fmt(refVal)}</td></tr>`;
   });
@@ -2179,10 +2445,11 @@ function renderPlayerDetail(playerId) {
   try {
     const { labels, keyIndex } = buildTimeline();
     const grid = document.getElementById('miniGrid');
+    const weeklyAndProjected = state.seasons.flatMap(s => effectiveWeeklyForSeason(s).filter(r => r.player_id === playerId));
     visibleStats.forEach((s, i) => {
       const data = new Array(labels.length).fill(null);
       let hasData = false;
-      weekly.forEach(r => {
+      weeklyAndProjected.forEach(r => {
         const idx = keyIndex[`${r.season}-${r.week}`];
         const val = numOrNull(r[s]);
         if (idx !== undefined) { data[idx] = val; if (val !== null) hasData = true; }
@@ -2219,16 +2486,18 @@ function renderPlayerWeeklyMatrix(playerId, stat) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  const weeklyForPlayer = state.weekly.filter(r => r.player_id === playerId);
-  const seasonTotalsForPlayer = state.seasonTotals.filter(r => r.player_id === playerId);
 
   const chartDatasets = [];
   let anyRow = false;
   state.seasons.forEach((season, i) => {
+    const weeklyForPlayer = effectiveWeeklyForSeason(season).filter(r => r.player_id === playerId);
+    const seasonTotalsForPlayer = effectiveSeasonTotals().filter(r => r.player_id === playerId);
+
     const weeksArr = new Array(18).fill(null);
-    weeklyForPlayer.filter(r => String(r.season) === String(season)).forEach(r => {
+    const isProjArr = new Array(18).fill(false);
+    weeklyForPlayer.forEach(r => {
       const idx = Number(r.week) - 1;
-      if (idx >= 0 && idx < 18) weeksArr[idx] = numOrNull(r[stat]);
+      if (idx >= 0 && idx < 18) { weeksArr[idx] = numOrNull(r[stat]); isProjArr[idx] = !!r._projected; }
     });
 
     const seasonRow = seasonTotalsForPlayer.find(r => String(r.season) === String(season));
@@ -2251,10 +2520,18 @@ function renderPlayerWeeklyMatrix(playerId, stat) {
     const diff = (avg !== null && leagueAvg !== null) ? +(avg - leagueAvg).toFixed(2) : null;
 
     const tr = document.createElement('tr');
-    const plainCells = [season, ...weeksArr.map(fmt), fmt(avg), fmt(leagueAvg)];
-    plainCells.forEach(val => {
+    const seasonTd = document.createElement('td');
+    seasonTd.textContent = season;
+    tr.appendChild(seasonTd);
+    weeksArr.forEach((v, wi) => {
       const td = document.createElement('td');
-      td.textContent = val;
+      td.textContent = fmt(v);
+      if (isProjArr[wi]) td.style.color = '#e8973f';
+      tr.appendChild(td);
+    });
+    [avg, leagueAvg].forEach(val => {
+      const td = document.createElement('td');
+      td.textContent = fmt(val);
       tr.appendChild(td);
     });
     const diffTd = document.createElement('td');
@@ -2264,10 +2541,21 @@ function renderPlayerWeeklyMatrix(playerId, stat) {
     tr.appendChild(diffTd);
     tbody.appendChild(tr);
 
-    chartDatasets.push({
+    const hasProjection = isProjArr.some(Boolean);
+    const dataset = {
       label: String(season), data: weeksArr, borderColor: PALETTE[i % PALETTE.length],
       backgroundColor: 'transparent', spanGaps: false, tension: .25, pointRadius: 3
-    });
+    };
+    if (hasProjection) {
+      // dash + tint the segments that touch a projected point, and give
+      // projected points themselves an orange fill so they stand out
+      dataset.pointBackgroundColor = weeksArr.map((_, wi) => isProjArr[wi] ? '#e8973f' : PALETTE[i % PALETTE.length]);
+      dataset.segment = {
+        borderDash: ctx => (isProjArr[ctx.p0DataIndex] || isProjArr[ctx.p1DataIndex]) ? [5, 4] : undefined,
+        borderColor: ctx => (isProjArr[ctx.p0DataIndex] || isProjArr[ctx.p1DataIndex]) ? '#e8973f' : undefined
+      };
+    }
+    chartDatasets.push(dataset);
   });
 
   table.appendChild(tbody);
