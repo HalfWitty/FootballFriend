@@ -1175,25 +1175,42 @@ function computePlayerProjectionContext() {
   const oppStatSet = new Set();
   Object.values(OPPORTUNITY_FIELDS).forEach(arr => arr.forEach(s => oppStatSet.add(s)));
 
-  const teams = uniqueSorted(state.weekly.map(r => r.team).filter(t => t && t !== 'FA'));
-  teams.forEach(team => {
-    const rows = weeklyRowsForTeam(team);
-    SCHEDULE_HISTORY_SEASONS.forEach(season => {
-      for (let w = 1; w <= 18; w++) {
-        const wk = rows.filter(r => String(r.season) === season && Number(r.week) === w);
-        if (!wk.length) continue;
-        oppStatSet.forEach(stat => {
-          const sum = wk.reduce((a, r) => a + (numOrNull(r[stat]) || 0), 0);
-          teamWeeklyStatTotal[`${team}|${season}|${w}|${stat}`] = sum;
-        });
-      }
+  // 2024-2025 weekly rows, indexed once by team+season+week (for team totals)
+  // and by player_id (for everything per-player below) - avoids re-scanning the
+  // full weekly array for every single player/team, which is what made this
+  // crawl on a full league's worth of data.
+  const historySet = new Set(SCHEDULE_HISTORY_SEASONS);
+  const byTeamSeasonWeek = new Map(); // "team|season|week" -> rows[]
+  const weeklyByPlayer2425 = new Map(); // player_id -> rows[]
+  state.weekly.forEach(r => {
+    if (!historySet.has(String(r.season))) return;
+    if (r.team && r.team !== 'FA' && !String(r.player_id).startsWith('TEAM_')) {
+      const tKey = `${r.team}|${r.season}|${r.week}`;
+      if (!byTeamSeasonWeek.has(tKey)) byTeamSeasonWeek.set(tKey, []);
+      byTeamSeasonWeek.get(tKey).push(r);
+    }
+    if (!weeklyByPlayer2425.has(r.player_id)) weeklyByPlayer2425.set(r.player_id, []);
+    weeklyByPlayer2425.get(r.player_id).push(r);
+  });
+
+  byTeamSeasonWeek.forEach((wk, key) => {
+    oppStatSet.forEach(stat => {
+      const sum = wk.reduce((a, r) => a + (numOrNull(r[stat]) || 0), 0);
+      teamWeeklyStatTotal[`${key}|${stat}`] = sum;
     });
   });
 
-  const players = [...state.players.values()].filter(p => p.player_id && !String(p.player_id).startsWith('TEAM_'));
+  // only skill-position players are ever projected, and only those with some
+  // 2024-2025 history to project from - filtering this early (instead of
+  // touching every inactive/practice-squad entry in the full player directory)
+  // is itself a major chunk of the speedup.
+  const players = [...state.players.values()].filter(p =>
+    p.player_id && FANTASY_POSITIONS.includes(p.position) && weeklyByPlayer2425.has(p.player_id)
+  );
+
   players.forEach(p => {
     const pid = p.player_id;
-    const rows2425 = state.weekly.filter(r => r.player_id === pid && SCHEDULE_HISTORY_SEASONS.includes(String(r.season)));
+    const rows2425 = weeklyByPlayer2425.get(pid) || [];
     if (!rows2425.length) return;
 
     const baseline = {};
@@ -1211,7 +1228,9 @@ function computePlayerProjectionContext() {
         rows2425.forEach(r => {
           const teamTotal = teamWeeklyStatTotal[`${r.team}|${r.season}|${r.week}|${stat}`];
           const v = numOrNull(r[stat]);
-          if (teamTotal && v !== null) shares.push(v / teamTotal);
+          // clamp to [0,1]: guards against noisy weeks (e.g. a mid-season trade
+          // leaving a stray tiny team total) producing a nonsensical share
+          if (teamTotal && v !== null) shares.push(Math.max(0, Math.min(1, v / teamTotal)));
         });
         if (shares.length) shareMap[stat] = median(shares);
       });
@@ -1238,7 +1257,7 @@ function computePlayerProjectionContext() {
   });
 
   FANTASY_POSITIONS.forEach(pos => {
-    const posRows = state.weekly.filter(r => r.position === pos && SCHEDULE_HISTORY_SEASONS.includes(String(r.season)));
+    const posRows = state.weekly.filter(r => r.position === pos && historySet.has(String(r.season)));
     state.statColumns.forEach(stat => {
       const allVals = [];
       posRows.forEach(r => {
@@ -1318,11 +1337,25 @@ function projectPlayerWeek(player, week, ctx, teamBaselines) {
 }
 
 const _playerSeasonProjectionCache = new Map();
+let _actual2026ByPlayerWeek = null;
+function getActual2026Index() {
+  if (_actual2026ByPlayerWeek) return _actual2026ByPlayerWeek;
+  const idx = new Map(); // player_id -> Map(week -> row)
+  state.weekly.forEach(r => {
+    if (String(r.season) !== PROJECTION_SEASON) return;
+    if (!idx.has(r.player_id)) idx.set(r.player_id, new Map());
+    idx.get(r.player_id).set(Number(r.week), r);
+  });
+  _actual2026ByPlayerWeek = idx;
+  return idx;
+}
+
 function getPlayerSeason2026Rows(player, ctx, teamBaselines) {
   if (_playerSeasonProjectionCache.has(player.player_id)) return _playerSeasonProjectionCache.get(player.player_id);
+  const actualByWeek = getActual2026Index().get(player.player_id);
   const rows = [];
   for (let w = 1; w <= 18; w++) {
-    const actual = state.weekly.find(r => r.player_id === player.player_id && String(r.season) === PROJECTION_SEASON && Number(r.week) === w);
+    const actual = actualByWeek && actualByWeek.get(w);
     if (actual) { rows.push({ ...actual, _projected: false }); continue; }
     const proj = projectPlayerWeek(player, w, ctx, teamBaselines);
     if (proj) rows.push(proj);
@@ -1343,9 +1376,13 @@ function buildEffective2026Data() {
   const teamBaselines = computeScheduleProjectionBaselines();
   const weekly = [];
   const seasonTotals = [];
-  const players = [...state.players.values()].filter(p => p.player_id && !String(p.player_id).startsWith('TEAM_'));
+  // only skill-position players on a team we have a schedule for are ever
+  // worth projecting - this is the same restriction used in the context build
+  // above, and skips the bulk of a full player directory (DEF/inactive/etc).
+  const players = [...state.players.values()].filter(p =>
+    p.player_id && FANTASY_POSITIONS.includes(p.position) && state.schedule.has(p.team)
+  );
   players.forEach(p => {
-    if (!state.schedule.has(p.team)) return; // no schedule loaded for this team -> nothing to project
     const rows = getPlayerSeason2026Rows(p, ctx, teamBaselines);
     if (!rows.length) return;
     weekly.push(...rows);
@@ -1367,6 +1404,7 @@ function buildEffective2026Data() {
 
 function resetProjectionCaches() {
   _playerSeasonProjectionCache.clear();
+  _actual2026ByPlayerWeek = null;
   _effectiveWeekly2026 = null;
   _effectiveSeasonTotals2026 = null;
 }
