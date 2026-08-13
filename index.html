@@ -151,6 +151,40 @@
   .chart-box.tall{height:340px;}
   .chart-box.short{height:200px;}
 
+  /* ---- info tab ---- */
+  .info-section{
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+    padding:0;margin-top:16px;overflow:hidden;
+  }
+  .info-section summary{
+    cursor:pointer;padding:16px 18px;font-family:'Teko',sans-serif;font-size:22px;
+    letter-spacing:1px;font-weight:600;color:var(--text);text-transform:uppercase;
+    list-style:none;display:flex;align-items:center;justify-content:space-between;
+  }
+  .info-section summary::-webkit-details-marker{display:none;}
+  .info-section summary::after{content:'+';color:var(--gold);font-size:22px;font-family:'Inter',sans-serif;}
+  .info-section[open] summary::after{content:'\2212';}
+  .info-section summary span{color:var(--muted);font-size:13px;text-transform:none;letter-spacing:0;margin-left:10px;}
+  .info-body{padding:0 18px 18px;}
+  .info-body h5{
+    font-family:'Inter',sans-serif;font-size:14px;font-weight:700;color:var(--gold);
+    margin:16px 0 6px;text-transform:uppercase;letter-spacing:.4px;
+  }
+  .info-body h5:first-child{margin-top:0;}
+  .info-body p{margin:0 0 10px;color:var(--text);font-size:14px;line-height:1.55;}
+  .info-body ul{margin:0 0 10px;padding-left:20px;color:var(--text);font-size:14px;line-height:1.6;}
+  .info-body li{margin-bottom:4px;}
+  .info-body code{
+    background:var(--line);color:var(--turf-bright);padding:1px 5px;border-radius:3px;
+    font-size:12.5px;font-family:'SFMono-Regular',Consolas,monospace;
+  }
+  dl.glossary{margin:0;}
+  dl.glossary dt{
+    font-weight:700;color:var(--text);font-size:14px;margin-top:10px;
+  }
+  dl.glossary dd{margin:2px 0 0;color:var(--muted);font-size:13.5px;line-height:1.5;}
+  .info-orange{color:#e8973f;font-weight:600;}
+
   /* ---- player search ---- */
   .player-search-wrap{position:relative;}
   .suggest-list{
@@ -225,6 +259,7 @@
     <button class="tab-btn" data-tab="position" disabled>Position</button>
     <button class="tab-btn" data-tab="player" disabled>Player</button>
     <button class="tab-btn" data-tab="compare" disabled>Compare</button>
+    <button class="tab-btn" data-tab="info" style="margin-left:auto;">Info</button>
   </div>
 
   <!-- ============ TEAM PANEL ============ -->
@@ -353,6 +388,188 @@
       </div>
     </div>
     <div id="compareDetail"><div class="empty-note">Choose a position and up to 3 players to compare.</div></div>
+  </div>
+
+  <!-- ============ INFO PANEL ============ -->
+  <div class="panel" id="panel-info">
+    <p class="empty-note" style="text-align:left;padding:0 0 14px;">
+      What every term, column, and chart on each tab means, and exactly how the 2026 projections
+      (shown in <span class="info-orange">orange</span> wherever they appear) are calculated.
+    </p>
+
+    <details class="info-section" open>
+      <summary>Projections &mdash; How They Work<span>read this first</span></summary>
+      <div class="info-body">
+        <p>
+          Once a <code>stats_2026_schedule.csv</code> is loaded, 2026 shows up everywhere as a normal season &ndash;
+          but until real games are played, most of its numbers are <strong>projected</strong>. Any figure that's
+          still (partly) a projection is shown in <span class="info-orange">orange text</span>. The instant a real
+          <code>stats_2026_part1/2.csv</code> row exists for a given player and week, it replaces the projection for
+          that week automatically &ndash; nothing needs to be reloaded or recalculated by hand.
+        </p>
+        <p>All projections are built only from <strong>2024 and 2025</strong> history (2022-2023 aren't used as a baseline). There are two projection engines:</p>
+
+        <h5>1. Team-level: pass/rush attempts &amp; pass %</h5>
+        <p>Used on the Team tab's Pass/Run Tendency &amp; Schedule table. For a team/week without real data yet:</p>
+        <ul>
+          <li><strong>Baseline</strong> = the team's own median pass attempts and median rush attempts, pooled across every 2024-2025 game they played.</li>
+          <li><strong>Opponent defense factor</strong> = how much passing/rushing that week's opponent has historically <em>allowed</em> (median attempts by whoever played them, 2024-2025), divided by the league-wide average attempts per game.</li>
+          <li><strong>Opponent matchup factor</strong> = the team's own attempts specifically in its 2024 and 2025 games against that exact opponent, compared to its baseline. This only nudges the projection if the direction is <em>consistent in both years</em> (both above baseline, or both below) &ndash; a mixed signal is treated as no pattern. One year of matchup data (instead of two) is applied at half strength.</li>
+        </ul>
+        <p>The defense factor and matchup factor are averaged together, then applied to the baseline. Pass % is derived from the resulting projected pass/rush attempts.</p>
+
+        <h5>2. Player-level: every individual stat</h5>
+        <p>Used on the Player and Position tabs, and the Volume vs. Consistency charts. Two different methods depending on the stat:</p>
+        <ul>
+          <li><strong>Opportunity stats</strong> (targets, carries, pass attempts &ndash; whatever counts as "Opportunity" for that position, see the Position tab glossary below) = that week's <em>team-level projected volume</em> (from engine #1 above) &times; the player's own historical <strong>share</strong> of that volume. Share = median of (player's stat that week &divide; team's total for that stat that week), across all their 2024-2025 games.</li>
+          <li><strong>Every other stat</strong> (yardage, touchdowns, receptions, fantasy points, etc.) = the player's own 2024-2025 median for that stat, adjusted by the same two-factor blend as the team engine: how much of that stat the opponent's defense has allowed to that position (vs. league average), averaged with the player's own consistent-direction history against that specific opponent.</li>
+        </ul>
+        <p>
+          A player only gets projected if they have some 2024-2025 history and their team's 2026 schedule is loaded.
+          Rookies or players with zero 2024-2025 games won't show a projection.
+        </p>
+      </div>
+    </details>
+
+    <details class="info-section">
+      <summary>Team Tab<span>roster stats, tendency, schedule</span></summary>
+      <div class="info-body">
+        <h5>Roster table</h5>
+        <p>
+          Rows are limited to players on that team's <strong>current (2026) roster</strong> &ndash; taken from each
+          player's most recently loaded team assignment, not just "anyone who ever played there." Once a player is
+          on the roster, all of their historical seasons are shown, even years accrued with a different team.
+        </p>
+        <dl class="glossary">
+          <dt>GP</dt><dd>Games played that season.</dd>
+          <dt>Total / Avg</dt><dd>Season total and per-game average for whichever stat is selected above.</dd>
+          <dt>Volatility %</dt><dd>
+            Coefficient of variation: 100 &times; (standard deviation of weekly values) &divide; |mean of weekly values|.
+            Lower = more consistent week to week; higher = more boom-or-bust. Requires at least 2 weeks of data.
+          </dd>
+        </dl>
+        <h5>Target Share / Carry Share charts</h5>
+        <p>
+          Each season gets its own bar (not an average across seasons): player's targets or carries that season
+          &divide; the team's total targets or carries that season &times; 100. The 8 players shown are chosen by
+          volume in the most recent season that actually has data for that team.
+        </p>
+        <h5>Pass/Run Tendency &amp; Schedule table</h5>
+        <dl class="glossary">
+          <dt>Team Pass Att / Team Rush Att / Team Pass %</dt>
+          <dd>That week's actual (or, for 2026, projected) attempts and the resulting pass-attempt share of all offensive plays.</dd>
+          <dt>Opp Def Median Pass %</dt>
+          <dd>
+            NOT the opponent's own passing tendency. It's the median pass % of the <em>other teams</em> that have
+            played that opponent &ndash; i.e. what opposing offenses have typically done against that defense (a
+            "pass funnel" indicator). For 2026 this blends real games played so far with 2024-2025 history for that
+            same opponent.
+          </dd>
+        </dl>
+        <p>
+          <strong>Coloring:</strong> if Opp Def Median Pass % is lower than the team's own pass % that week, the Opp
+          Def column is red and the Team Pass % column is green (and vice versa) &ndash; flagging weeks where a
+          team's actual/projected pass rate ran against what that defense usually sees.
+        </p>
+        <p>Scoped to 2024-2026 only; 2022-2023 aren't tracked for this table. The median line above the table covers 2024 &amp; 2025 only.</p>
+      </div>
+    </details>
+
+    <details class="info-section">
+      <summary>Position Tab<span>rankings, ADP/value, volume vs. consistency</span></summary>
+      <div class="info-body">
+        <h5>Main season table</h5>
+        <dl class="glossary">
+          <dt>Opportunity</dt>
+          <dd>
+            Position-specific volume, not points: QB = pass attempts + rush attempts &middot; RB = carries + targets
+            &middot; WR/TE = targets &middot; K = FG attempts + XP attempts.
+          </dd>
+          <dt>Opp Rank</dt>
+          <dd>Rank at that position, that season, by total Opportunity volume. 1 = most opportunities.</dd>
+          <dt>Success Rate / Success Rank</dt>
+          <dd>
+            Fantasy points earned per unit of Opportunity (efficiency, not volume). Success Rank only includes
+            players with at least half the position's median Opportunity that season, so a couple of garbage-time
+            touches don't vault someone to the top on a tiny sample.
+          </dd>
+          <dt>+/- Lg Avg</dt><dd>Player's per-game average minus the position's league-wide weekly average, that season.</dd>
+          <dt>+/- Med</dt><dd>Player's per-game average minus the League Median row (median across the players currently shown in the table).</dd>
+          <dt>League Median row</dt><dd>Pinned row showing the median of each column among the currently filtered/displayed players.</dd>
+        </dl>
+        <p>Every numeric column is color-scaled green (best) to red (worst) within that column. Rank-style columns treat 1 (best rank) as green. Year checkboxes above the table toggle 2022-2026 in or out.</p>
+
+        <h5>Draft ADP &amp; Value table</h5>
+        <dl class="glossary">
+          <dt>ADP</dt><dd>Average draft position from your ADP/value sheet &ndash; lower number = drafted earlier.</dd>
+          <dt>Value</dt><dd>Auction-style $ value from the same sheet.</dd>
+          <dt>Stat Rank</dt><dd>The player's rank at that position, that season, in whichever stat is selected in the dropdown above (1 = best) &ndash; not the same ranking as Opp Rank/Success Rank, which are always Opportunity/efficiency-based.</dd>
+          <dt>$/Stat Pt</dt><dd>That year's Value &divide; the player's season TOTAL for the selected stat &ndash; literal cost per unit of production. Rounded to 2 decimals.</dd>
+        </dl>
+        <p>Click any column header to sort by it. The pinned row is the position's median draft $ per year. Cells are color-scaled (cheap $/pt and good ranks = green).</p>
+
+        <h5>Volume vs. Consistency scatter</h5>
+        <p>One dot per player, among players with a non-zero season total for the selected stat:</p>
+        <ul>
+          <li><strong>X (Volume Percentile)</strong>: percentile rank of the player's season-total production.</li>
+          <li><strong>Y (Consistency Percentile)</strong>: a single "typical week" threshold is computed as the median of every weekly value posted by that qualifying group; each player's weeks-above-threshold count is then turned into a percentile the same way.</li>
+          <li><strong>Dot color</strong>: draft $ from the ADP/value sheet &ndash; green = cheap, red = expensive.</li>
+        </ul>
+        <p>With multiple years checked, X, Y, and dot color are each averaged across the seasons that player qualifies in. For 2026, X/Y use real weeks where available and projections for the rest; dot color uses that year's ADP sheet value.</p>
+      </div>
+    </details>
+
+    <details class="info-section">
+      <summary>Player Tab<span>season table, weekly trend, volume vs. consistency</span></summary>
+      <div class="info-body">
+        <h5>Season table</h5>
+        <p>
+          One row per stat, one column per season. Toggle between <strong>Totals</strong> and <strong>Weekly
+          Median</strong> using the control above the table. The reference column on the right shows the position's
+          2025 league median (Totals mode) or overall league median-of-medians (Weekly Median mode). Each year's cell
+          is color-scaled against the spread of every player at that position that season.
+        </p>
+        <h5>Weekly Trend chart &amp; table</h5>
+        <p>
+          Shows every week of every loaded season for whichever stat is selected in the dropdown next to the chart.
+          For 2026, real weeks plot normally; projected weeks are drawn with an orange dashed line segment and an
+          orange point, and the matching table cell is orange text.
+        </p>
+        <h5>Volume vs. Consistency by Season</h5>
+        <p>
+          Same X/Y/color definitions as the Position tab's version (see above), but plotted as one point per season
+          for this single player, each computed against that season's full position field (not averaged together).
+          A faint line connects the points in chronological order.
+        </p>
+      </div>
+    </details>
+
+    <details class="info-section">
+      <summary>Compare Tab<span>side-by-side player comparison</span></summary>
+      <div class="info-body">
+        <p>Pick a position and up to 3 players. For every stat with data for at least one of them:</p>
+        <ul>
+          <li><strong>Bar chart</strong>: vertical grouped bars, weeks 1-18 across 2024-2026 on the x-axis, one bar per player per week. This chart uses <em>real weekly data only</em> &ndash; it does not show 2026 projections.</li>
+          <li><strong>Median table</strong>: each player's weekly median for that stat in 2024, 2025, and 2026 (2026 median is computed from whatever real weeks are loaded so far).</li>
+        </ul>
+        <p>Player dropdowns are limited to players on a current (2026) roster.</p>
+      </div>
+    </details>
+
+    <details class="info-section">
+      <summary>General Glossary</summary>
+      <div class="info-body">
+        <dl class="glossary">
+          <dt>PPR</dt><dd>Points Per Reception &ndash; a scoring format that awards fantasy points for each catch, in addition to yardage/touchdowns.</dd>
+          <dt>ADP</dt><dd>Average Draft Position &ndash; where a player is typically taken in a draft, averaged across drafts.</dd>
+          <dt>GP</dt><dd>Games Played.</dd>
+          <dt>CV / Volatility %</dt><dd>Coefficient of variation &ndash; standard deviation expressed as a percentage of the mean; a scale-independent measure of week-to-week consistency.</dd>
+          <dt>D/ST or DEF</dt><dd>Team defense/special teams, scored as a single fantasy "player" entry.</dd>
+          <dt>FA</dt><dd>Free agent &ndash; not currently on an NFL roster.</dd>
+          <dt>BYE</dt><dd>A week where a team doesn't play; shown as an opponent of "BYE" on the schedule.</dd>
+        </dl>
+      </div>
+    </details>
   </div>
 
 </div>
@@ -972,11 +1189,16 @@ function renderShareCharts(team) {
       bySeason[season]._name = bySeason[season]._name || {};
       bySeason[season]._name[r.player_id] = r.full_name;
     });
-    // rank players by most recent season's raw total, take top 8
-    const latest = String(state.seasons[state.seasons.length - 1]);
-    const ranked = [...(bySeason[latest] ? bySeason[latest].byPlayer.entries() : [])]
-      .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([pid]) => pid);
-    const names = ranked.map(pid => (bySeason[latest]._name && bySeason[latest]._name[pid]) || pid);
+    // rank players using the most recent season that actually HAS weekly data
+    // for this team - state.seasons can now include a schedule-only season
+    // (e.g. 2026 before any real stats have loaded), which would otherwise
+    // leave the ranking (and the whole chart) empty.
+    const seasonsWithData = state.seasons.map(String).filter(s => bySeason[s] && bySeason[s].byPlayer.size > 0);
+    const latest = seasonsWithData.length ? seasonsWithData[seasonsWithData.length - 1] : null;
+    const ranked = latest
+      ? [...bySeason[latest].byPlayer.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([pid]) => pid)
+      : [];
+    const names = ranked.map(pid => (latest && bySeason[latest]._name && bySeason[latest]._name[pid]) || pid);
     const datasets = state.seasons.map((season, i) => ({
       label: String(season),
       data: ranked.map(pid => {
