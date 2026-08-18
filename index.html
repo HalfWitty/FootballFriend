@@ -225,6 +225,25 @@
   ::-webkit-scrollbar{height:8px;width:8px;}
   ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px;}
   ::-webkit-scrollbar-track{background:var(--panel);}
+  .print-btn{
+    background:var(--turf);color:#08130a;border:none;border-radius:6px;
+    padding:9px 16px;font-family:'Teko',sans-serif;font-size:16px;letter-spacing:1px;
+    font-weight:600;text-transform:uppercase;cursor:pointer;white-space:nowrap;
+  }
+  .print-btn:hover{background:var(--turf-bright);}
+
+  @media print{
+    body{background:#fff;color:#000;}
+    .no-print, header, .yard-divider, .dropzone, .url-load-box, .tabs, .chart-card, .empty-note{display:none !important;}
+    #panel-draft .empty-note#draftNote{display:block !important;color:#333;font-size:11px;}
+    .panel{display:none !important;}
+    .panel.active, #panel-draft{display:block !important;}
+    .table-scroll{overflow:visible !important;max-height:none !important;border:none;}
+    table{color:#000;width:100%;}
+    thead th{position:static;background:#eee !important;color:#000 !important;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+    tbody td{color:#000 !important;border-bottom:1px solid #ccc;}
+    tr.league-avg-row td{-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  }
 </style>
 </head>
 <body>
@@ -241,7 +260,7 @@
   <div class="yard-divider" data-label="Load Data"></div>
 
   <div class="dropzone" id="dropzone">
-    <input type="file" id="fileInput" multiple accept=".csv">
+    <input type="file" id="fileInput" multiple accept=".csv,.json">
     <h3>Drop your Sleeper CSVs here, or click to browse</h3>
     <p>
       stats_2022_part1/2.csv &middot; stats_2023_part1/2.csv &middot; stats_2024_weekly_part1/2.csv &middot;
@@ -259,6 +278,7 @@
     <button class="tab-btn" data-tab="position" disabled>Position</button>
     <button class="tab-btn" data-tab="player" disabled>Player</button>
     <button class="tab-btn" data-tab="compare" disabled>Compare</button>
+    <button class="tab-btn" data-tab="draft" disabled>Draft</button>
     <button class="tab-btn" data-tab="info" style="margin-left:auto;">Info</button>
   </div>
 
@@ -390,7 +410,49 @@
     <div id="compareDetail"><div class="empty-note">Choose a position and up to 3 players to compare.</div></div>
   </div>
 
-  <!-- ============ INFO PANEL ============ -->
+  <!-- ============ DRAFT PANEL ============ -->
+  <div class="panel" id="panel-draft">
+    <div class="chart-card no-print">
+      <h4>League Settings <span style="color:var(--muted);font-size:13px;">(auto-filled from league_2026_info.json when loaded &ndash; edit freely, e.g. for a keeper/custom league)</span></h4>
+      <div class="controls" style="margin-bottom:0;">
+        <div class="field"><label>Teams</label><input type="number" min="1" max="32" id="draftNumTeams" class="search-input" style="width:70px;" value="12"></div>
+        <div class="field"><label>QB</label><input type="number" min="0" max="4" id="draftSlotsQB" class="search-input" style="width:60px;" value="1"></div>
+        <div class="field"><label>RB</label><input type="number" min="0" max="6" id="draftSlotsRB" class="search-input" style="width:60px;" value="2"></div>
+        <div class="field"><label>WR</label><input type="number" min="0" max="6" id="draftSlotsWR" class="search-input" style="width:60px;" value="2"></div>
+        <div class="field"><label>TE</label><input type="number" min="0" max="4" id="draftSlotsTE" class="search-input" style="width:60px;" value="1"></div>
+        <div class="field"><label>FLEX (R/W/T)</label><input type="number" min="0" max="4" id="draftSlotsFLEX" class="search-input" style="width:60px;" value="1"></div>
+        <div class="field"><label>SUPERFLEX (Q/R/W/T)</label><input type="number" min="0" max="4" id="draftSlotsSFLEX" class="search-input" style="width:60px;" value="0"></div>
+        <div class="field"><label>K</label><input type="number" min="0" max="2" id="draftSlotsK" class="search-input" style="width:60px;" value="1"></div>
+      </div>
+    </div>
+
+    <div class="controls no-print">
+      <div class="field">
+        <label>Position</label>
+        <select id="draftPosFilter">
+          <option value="ALL">All</option>
+          <option value="QB">QB</option>
+          <option value="RB">RB</option>
+          <option value="WR">WR</option>
+          <option value="TE">TE</option>
+          <option value="K">K</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Search</label>
+        <input class="search-input" id="draftFilter" placeholder="Filter by name...">
+      </div>
+      <div class="field">
+        <label>&nbsp;</label>
+        <button id="draftPrintBtn" type="button" class="print-btn">Print Cheat Sheet</button>
+      </div>
+    </div>
+
+    <p class="empty-note" id="draftNote" style="text-align:left;padding:0 0 10px;"></p>
+    <div class="table-scroll"><table id="draftTable"></table></div>
+  </div>
+
+
   <div class="panel" id="panel-info">
     <p class="empty-note" style="text-align:left;padding:0 0 14px;">
       What every term, column, and chart on each tab means, and exactly how the 2026 projections
@@ -597,6 +659,7 @@ let state = {
   adpConsolidated: new Map(),      // suffix-merged version of `adp` (handles Jr./Sr./III drift across years)
   adpConsolidatedByName: new Map(),
   schedule: new Map(),       // team -> Map(week -> {opponent, home_away, date}) - future/full-season schedule (e.g. 2026)
+  leagueSettings: null,      // {numTeams, rosterPositions: [...]} from a Sleeper league_*_info.json, if loaded
   selectedPlayerId: null,
   filesLoaded: []
 };
@@ -620,10 +683,24 @@ dropzone.addEventListener('drop', e => handleFiles(e.dataTransfer.files));
 fileInput.addEventListener('change', e => handleFiles(e.target.files));
 
 function handleFiles(fileList) {
-  const files = Array.from(fileList).filter(f => f.name.endsWith('.csv'));
+  const files = Array.from(fileList).filter(f => f.name.endsWith('.csv') || f.name.endsWith('.json'));
   if (!files.length) return;
   let pending = files.length;
   files.forEach(file => {
+    if (file.name.endsWith('.json')) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          classifyAndStoreLeagueInfo(file.name, JSON.parse(reader.result));
+          addChip(file.name, true);
+        } catch (e) { addChip(file.name + ' (invalid JSON)', false); }
+        pending--;
+        if (pending === 0) finalizeData();
+      };
+      reader.onerror = () => { addChip(file.name + ' (failed)', false); pending--; if (pending === 0) finalizeData(); };
+      reader.readAsText(file);
+      return;
+    }
     Papa.parse(file, {
       header: true,
       dynamicTyping: true,
@@ -634,7 +711,7 @@ function handleFiles(fileList) {
         addChip(file.name, true);
         if (pending === 0) finalizeData();
       },
-      error: () => { addChip(file.name + ' (failed)', false); pending--; }
+      error: () => { addChip(file.name + ' (failed)', false); pending--; if (pending === 0) finalizeData(); }
     });
   });
 }
@@ -667,7 +744,8 @@ const REPOSITORY_FILES = [
   'data/league_2026_rosters.csv',
   'data/ADP_values_2024_2026.csv',
   'data/stats_2026_schedule.csv',
-  'data/players_nfl.csv'
+  'data/players_nfl.csv',
+  'data/league_2026_info.json'
 ];
 
 async function loadRepositoryData() {
@@ -692,6 +770,21 @@ async function loadRepositoryData() {
         continue;
       }
 
+      // Remove "data/" so the existing filename
+      // classification continues to work.
+      const fileName = filePath.split('/').pop();
+
+      if (fileName.endsWith('.json')) {
+        try {
+          classifyAndStoreLeagueInfo(fileName, JSON.parse(await response.text()));
+          addChip(fileName, true);
+          loadedCount++;
+        } catch (e) {
+          addChip(`${fileName} (invalid JSON)`, false);
+        }
+        continue;
+      }
+
       const csvText = await response.text();
 
       const results = Papa.parse(csvText, {
@@ -706,10 +799,6 @@ async function loadRepositoryData() {
           results.errors
         );
       }
-
-      // Remove "data/" so the existing filename
-      // classification continues to work.
-      const fileName = filePath.split('/').pop();
 
       classifyAndStore(
         fileName,
@@ -839,6 +928,18 @@ function classifyAndStore(filename, rows) {
   }
 }
 
+// Parses a Sleeper league_*_info.json export (the raw /v1/league/{id} response)
+// for the two fields Value Over Replacement needs: team count and starting
+// roster slots. Silently no-ops on anything that doesn't look like that shape,
+// since this is fed the same generic file-drop/JSON pipeline as everything else.
+function classifyAndStoreLeagueInfo(filename, obj) {
+  if (!obj || typeof obj !== 'object' || !Array.isArray(obj.roster_positions)) return;
+  state.leagueSettings = {
+    numTeams: Number(obj.total_rosters) || 12,
+    rosterPositions: obj.roster_positions
+  };
+}
+
 function normalizeRow(r) {
   r.player_id = String(r.player_id);
   // Sleeper's raw stats rows already carry their own team/status, and merging
@@ -933,6 +1034,7 @@ function finalizeData() {
   populateAllControls();
   renderTeamTab();
   renderPositionTab();
+  renderDraftTab();
 }
 
 function updateStatusLine() {
@@ -1991,6 +2093,232 @@ function computeSOSRankMap(pos, weeksFilter) {
 }
 
 const LATE_SEASON_WEEKS = [15, 16, 17];
+
+/* ==========================================================================
+   DRAFT BOARD: VALUE OVER REPLACEMENT & TIERS
+   VOR = a player's projected 2026 points minus the points of the last
+   startable player at their position, given your league's team count and
+   starting lineup. This is what actually lets you compare a RB to a WR on
+   one scale, instead of two separate positional lists. FLEX/SUPERFLEX slots
+   are split evenly across their eligible positions - a simplification, but a
+   transparent, documented one (see the note rendered above the table).
+   Tiers cluster players at each position by natural gaps in their points
+   (a gap bigger than one standard deviation above the average gap = a new
+   tier), rather than an arbitrary fixed group size.
+========================================================================== */
+let draftSettingsInitialized = false;
+
+function getDraftSettings() {
+  const val = (id, dflt) => {
+    const el = document.getElementById(id);
+    const n = el ? Number(el.value) : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : dflt;
+  };
+  return {
+    numTeams: val('draftNumTeams', 12),
+    QB: val('draftSlotsQB', 1),
+    RB: val('draftSlotsRB', 2),
+    WR: val('draftSlotsWR', 2),
+    TE: val('draftSlotsTE', 1),
+    FLEX: val('draftSlotsFLEX', 1),
+    SUPERFLEX: val('draftSlotsSFLEX', 0),
+    K: val('draftSlotsK', 1)
+  };
+}
+
+function populateDraftSettingsFromLeague() {
+  const ls = state.leagueSettings;
+  const counts = { QB: 1, RB: 2, WR: 2, TE: 1, FLEX: 1, SUPER_FLEX: 0, K: 1 };
+  let numTeams = 12;
+  if (ls && Array.isArray(ls.rosterPositions)) {
+    numTeams = ls.numTeams || 12;
+    Object.keys(counts).forEach(k => counts[k] = 0);
+    ls.rosterPositions.forEach(p => { if (counts.hasOwnProperty(p)) counts[p]++; });
+  }
+  document.getElementById('draftNumTeams').value = numTeams;
+  document.getElementById('draftSlotsQB').value = counts.QB;
+  document.getElementById('draftSlotsRB').value = counts.RB;
+  document.getElementById('draftSlotsWR').value = counts.WR;
+  document.getElementById('draftSlotsTE').value = counts.TE;
+  document.getElementById('draftSlotsFLEX').value = counts.FLEX;
+  document.getElementById('draftSlotsSFLEX').value = counts.SUPER_FLEX;
+  document.getElementById('draftSlotsK').value = counts.K;
+}
+
+// Replacement-level points per position, using the current draft settings.
+function computeReplacementLevels(pointsField, season) {
+  const settings = getDraftSettings();
+  const pointsByPos = {};
+  FANTASY_POSITIONS.forEach(pos => {
+    const rows = effectiveSeasonTotals().filter(r => r.position === pos && String(r.season) === String(season) && (Number(r.gp) || 0) > 0);
+    pointsByPos[pos] = rows.map(r => numOrNull(r[pointsField]) || 0).sort((a, b) => b - a);
+  });
+
+  const startersNeeded = {
+    QB: settings.numTeams * settings.QB,
+    RB: settings.numTeams * settings.RB,
+    WR: settings.numTeams * settings.WR,
+    TE: settings.numTeams * settings.TE,
+    K: settings.numTeams * settings.K
+  };
+  const flexEach = (settings.numTeams * settings.FLEX) / 3;
+  ['RB', 'WR', 'TE'].forEach(p => startersNeeded[p] += flexEach);
+  const sflexEach = (settings.numTeams * settings.SUPERFLEX) / 4;
+  ['QB', 'RB', 'WR', 'TE'].forEach(p => startersNeeded[p] += sflexEach);
+
+  const replacement = {}, replacementRank = {};
+  FANTASY_POSITIONS.forEach(pos => {
+    const rank = Math.max(1, Math.round(startersNeeded[pos]));
+    const arr = pointsByPos[pos];
+    replacementRank[pos] = rank;
+    replacement[pos] = arr.length ? (arr[Math.min(rank, arr.length) - 1] ?? arr[arr.length - 1] ?? 0) : 0;
+  });
+  return { replacement, replacementRank, startersNeeded };
+}
+
+// Clusters a descending-sorted array of values into tiers by gap size.
+// Returns an array of tier numbers (1 = best), aligned to the input order.
+function computeTierNumbers(sortedDescValues) {
+  if (sortedDescValues.length === 0) return [];
+  if (sortedDescValues.length === 1) return [1];
+  const gaps = [];
+  for (let i = 1; i < sortedDescValues.length; i++) gaps.push(sortedDescValues[i - 1] - sortedDescValues[i]);
+  const meanGap = gaps.reduce((a, b) => a + b, 0) / gaps.length;
+  const variance = gaps.reduce((a, b) => a + (b - meanGap) ** 2, 0) / gaps.length;
+  const stdGap = Math.sqrt(variance);
+  const threshold = meanGap + stdGap;
+  const tiers = [1];
+  let current = 1;
+  for (let i = 0; i < gaps.length; i++) {
+    if (gaps[i] > threshold && gaps[i] > 0.05) current++;
+    tiers.push(current);
+  }
+  return tiers;
+}
+
+let draftSortState = { key: 'vor', dir: -1 };
+
+function renderDraftTab() {
+  if (!draftSettingsInitialized) { populateDraftSettingsFromLeague(); draftSettingsInitialized = true; }
+  const pointsField = POINTS_FIELDS_PRIORITY.find(f => state.statColumns.includes(f));
+  const table = document.getElementById('draftTable');
+  const note = document.getElementById('draftNote');
+  if (!pointsField) {
+    table.innerHTML = `<tr><td class="empty-note">No fantasy points field (pts_ppr/pts_half_ppr/pts_std) found in loaded data.</td></tr>`;
+    note.textContent = '';
+    return;
+  }
+
+  const season = PROJECTION_SEASON;
+  const { replacement, replacementRank, startersNeeded } = computeReplacementLevels(pointsField, season);
+  const settings = getDraftSettings();
+
+  // build per-position sorted lists (for tiers) and a flat player list (for the board)
+  const players = [];
+  FANTASY_POSITIONS.forEach(pos => {
+    const rows = effectiveSeasonTotals().filter(r => r.position === pos && String(r.season) === String(season) && (Number(r.gp) || 0) > 0);
+    const withPoints = rows.map(r => ({ row: r, pts: numOrNull(r[pointsField]) || 0 })).sort((a, b) => b.pts - a.pts);
+    const tierNums = computeTierNumbers(withPoints.map(w => w.pts));
+    withPoints.forEach((w, i) => {
+      const p = state.players.get(w.row.player_id);
+      const team = w.row.team || (p ? p.team : '');
+      const byeWeek = getTeamByeWeek(team);
+      const sosRank = computeSOSRankMap(pos).rankMap.get(team) || null;
+      players.push({
+        player_id: w.row.player_id,
+        full_name: w.row.full_name,
+        position: pos,
+        team,
+        bye: byeWeek,
+        pts_2026: +w.pts.toFixed(1),
+        vor: +(w.pts - replacement[pos]).toFixed(1),
+        tier: tierNums[i],
+        tier_label: `${pos}${tierNums[i]}`,
+        sos_rank: sosRank,
+        proj: !!w.row._hasProjection
+      });
+    });
+  });
+
+  const posFilter = document.getElementById('draftPosFilter').value;
+  const filterText = (document.getElementById('draftFilter').value || '').toLowerCase();
+  let rows = players;
+  if (posFilter !== 'ALL') rows = rows.filter(r => r.position === posFilter);
+  if (filterText) rows = rows.filter(r => (r.full_name || '').toLowerCase().includes(filterText));
+
+  rows = [...rows].sort((a, b) => {
+    const av = a[draftSortState.key], bv = b[draftSortState.key];
+    return ((Number(av) || 0) - (Number(bv) || 0)) * draftSortState.dir;
+  });
+
+  const startersSummary = FANTASY_POSITIONS.map(p => `${p}: top ${replacementRank[p]}`).join(' · ');
+  note.textContent =
+    `Value Over Replacement (VOR) = projected 2026 points minus the last startable player at that position, ` +
+    `given ${settings.numTeams} teams and your roster settings (FLEX/SUPERFLEX split evenly across eligible positions). ` +
+    `Replacement cutoffs used: ${startersSummary}. Tiers cluster players by natural point gaps within their own position ` +
+    `(not compared across positions). Orange rows are still partly projected and will firm up as 2026 games are played.`;
+
+  const cols = ['full_name', 'position', 'team', 'bye', 'tier_label', 'pts_2026', 'vor', 'sos_rank'];
+  const labels = { full_name: 'Player', position: 'Pos', bye: 'Bye', tier_label: 'Tier', pts_2026: `${season} Pts`, vor: 'VOR', sos_rank: 'SOS Rank' };
+
+  table.innerHTML = '';
+  if (!rows.length) { table.innerHTML = `<tr><td class="empty-note">No qualifying players.</td></tr>`; return; }
+
+  const thead = document.createElement('thead');
+  const trh = document.createElement('tr');
+  cols.forEach(c => {
+    const th = document.createElement('th');
+    th.textContent = labels[c] || statLabel(c);
+    th.addEventListener('click', () => {
+      if (draftSortState.key === c) draftSortState.dir *= -1; else { draftSortState.key = c; draftSortState.dir = -1; }
+      renderDraftTab();
+    });
+    th.classList.toggle('sorted', draftSortState.key === c && draftSortState.dir === -1);
+    th.classList.toggle('sorted-asc', draftSortState.key === c && draftSortState.dir === 1);
+    trh.appendChild(th);
+  });
+  thead.appendChild(trh);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  rows.forEach(r => {
+    const tr = document.createElement('tr');
+    cols.forEach(c => {
+      const td = document.createElement('td');
+      if (c === 'position') td.innerHTML = `<span class="pos-tag">${r.position}</span>`;
+      else td.textContent = fmt(r[c]);
+      if (r.proj && ['pts_2026', 'vor'].includes(c)) td.style.color = '#e8973f';
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+
+  // color VOR and SOS Rank against the currently-filtered pool
+  const colorColIdx = ['vor', 'sos_rank'].map(c => cols.indexOf(c));
+  colorColIdx.forEach(colIndex => {
+    const col = cols[colIndex];
+    const vals = rows.map(r => numOrNull(r[col])).filter(v => v !== null && !Number.isNaN(v));
+    if (vals.length < 2) return;
+    const min = Math.min(...vals), max = Math.max(...vals);
+    if (min === max) return;
+    const invert = isLowerBetterCol(col);
+    rows.forEach((r, ri) => {
+      const v = numOrNull(r[col]);
+      if (v === null) return;
+      let t = (v - min) / (max - min);
+      if (invert) t = 1 - t;
+      const td = tbody.children[ri].children[colIndex];
+      if (td) td.style.backgroundColor = colorFromT(t);
+    });
+  });
+}
+
+document.getElementById('draftPosFilter').addEventListener('change', renderDraftTab);
+document.getElementById('draftFilter').addEventListener('input', renderDraftTab);
+['draftNumTeams','draftSlotsQB','draftSlotsRB','draftSlotsWR','draftSlotsTE','draftSlotsFLEX','draftSlotsSFLEX','draftSlotsK']
+  .forEach(id => document.getElementById(id).addEventListener('change', renderDraftTab));
+document.getElementById('draftPrintBtn').addEventListener('click', () => window.print());
 
 function renderPositionTab() {
   if (!state.statColumns.length) return;
