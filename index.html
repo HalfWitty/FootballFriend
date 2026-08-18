@@ -1629,6 +1629,7 @@ function resetProjectionCaches() {
   _actual2026ByPlayerWeek = null;
   _effectiveWeekly2026 = null;
   _effectiveSeasonTotals2026 = null;
+  _defensePointsAllowedCache = null;
 }
 
 // Drop-in replacements for state.seasonTotals / state.weekly that fold the
@@ -1895,6 +1896,102 @@ function buildPositionSeasonRows(pos, stat) {
   return [...byPlayer.values()];
 }
 
+/* ==========================================================================
+   BYE WEEKS & STRENGTH OF SCHEDULE
+   SOS is derived entirely from data already loaded, not an external power
+   ranking feed: for each defense, we compute the average fantasy points it
+   has allowed to each position across the 2024-2025 seasons (using the same
+   per-game opponent data the schedule/projection tables already use), then
+   average that "points allowed" figure across every opponent a team's 2026
+   schedule includes. A team facing generous defenses ranks as an easy (high)
+   schedule; a team facing stingy defenses ranks as a hard (low) one.
+========================================================================== */
+let _defensePointsAllowedCache = null;
+
+function computeDefensePointsAllowedByPosition() {
+  if (_defensePointsAllowedCache) return _defensePointsAllowedCache;
+  const pointsField = POINTS_FIELDS_PRIORITY.find(f => state.statColumns.includes(f));
+  const result = {}; // defenseTeam -> position -> avg points allowed per game
+  if (!pointsField) { _defensePointsAllowedCache = result; return result; }
+
+  // sum all of one position's points scored against a defense in a single
+  // game (not per-individual-player), since a defense giving up points to
+  // multiple receivers in one game is a bigger "allowed" signal than any one
+  // player's total.
+  const gameTotals = {}; // "team|pos|season|week" -> summed points
+  state.weekly.forEach(r => {
+    if (!SCHEDULE_HISTORY_SEASONS.includes(String(r.season))) return;
+    if (!FANTASY_POSITIONS.includes(r.position)) return;
+    if (!r.opponent || r.opponent === '' || r.opponent === 'BYE') return;
+    const key = `${r.opponent}|${r.position}|${r.season}|${r.week}`;
+    gameTotals[key] = (gameTotals[key] || 0) + (numOrNull(r[pointsField]) || 0);
+  });
+
+  const buckets = {}; // defenseTeam -> position -> [gameTotal, ...]
+  Object.keys(gameTotals).forEach(key => {
+    const [defTeam, pos] = key.split('|');
+    buckets[defTeam] = buckets[defTeam] || {};
+    buckets[defTeam][pos] = buckets[defTeam][pos] || [];
+    buckets[defTeam][pos].push(gameTotals[key]);
+  });
+
+  Object.keys(buckets).forEach(team => {
+    result[team] = {};
+    Object.keys(buckets[team]).forEach(pos => {
+      const arr = buckets[team][pos];
+      result[team][pos] = arr.reduce((a, b) => a + b, 0) / arr.length;
+    });
+  });
+  _defensePointsAllowedCache = result;
+  return result;
+}
+
+// This team's 2026 bye week, from the loaded schedule file. Returns null if
+// no schedule is loaded or no bye is found.
+function getTeamByeWeek(team) {
+  const sched = state.schedule.get(team);
+  if (!sched) return null;
+  for (const [week, d] of sched.entries()) {
+    if (d.opponent === 'BYE') return week;
+  }
+  return null;
+}
+
+// Average "points allowed to this position" across a team's 2026 opponents
+// (optionally restricted to specific weeks, e.g. [15,16,17] for a late-season
+// read). Higher = easier schedule (opponents have historically allowed more).
+function computeTeamSOS(team, pos, weeksFilter) {
+  const defenseMap = computeDefensePointsAllowedByPosition();
+  const teamSchedule = state.schedule.get(team);
+  if (!teamSchedule) return null;
+  const weeks = weeksFilter || Array.from({ length: 18 }, (_, i) => i + 1);
+  const values = [];
+  weeks.forEach(w => {
+    const sched = teamSchedule.get(w);
+    if (!sched || !sched.opponent || sched.opponent === 'BYE') return;
+    const allowed = defenseMap[sched.opponent] && defenseMap[sched.opponent][pos];
+    if (allowed != null) values.push(allowed);
+  });
+  if (!values.length) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
+}
+
+// Ranks every team's schedule (1 = easiest) for a position, across all teams
+// that have both a loaded 2026 schedule and enough 2024-2025 history to grade
+// their opponents. weeksFilter narrows to specific weeks (e.g. late season).
+function computeSOSRankMap(pos, weeksFilter) {
+  const teams = uniqueSorted(state.weekly.map(r => r.team).filter(t => t && t !== 'FA'));
+  const computed = teams
+    .map(team => ({ team, value: computeTeamSOS(team, pos, weeksFilter) }))
+    .filter(c => c.value !== null);
+  computed.sort((a, b) => b.value - a.value); // higher points-allowed = easier = rank 1
+  const rankMap = new Map(computed.map((c, i) => [c.team, i + 1]));
+  const valueMap = new Map(computed.map(c => [c.team, +c.value.toFixed(1)]));
+  return { rankMap, valueMap, poolSize: computed.length };
+}
+
+const LATE_SEASON_WEEKS = [15, 16, 17];
+
 function renderPositionTab() {
   if (!state.statColumns.length) return;
   const pos = document.getElementById('posSelect').value;
@@ -1938,10 +2035,20 @@ function renderPositionTab() {
     });
   });
   const oppFieldsLabel = OPPORTUNITY_LABELS[pos] || 'volume';
+  const sosRankFull = computeSOSRankMap(pos);
+  const sosRankLate = computeSOSRankMap(pos, LATE_SEASON_WEEKS);
+  rows.forEach(r => {
+    r.bye = getTeamByeWeek(r.team);
+    r.sos_rank = sosRankFull.rankMap.get(r.team) || null;
+    r.sos_rank_late = sosRankLate.rankMap.get(r.team) || null;
+  });
   document.getElementById('posOpportunityNote').textContent =
     `Opportunity = ${oppFieldsLabel}. Success Rate = fantasy points earned per opportunity ` +
     `(Success Rank only among players with at least half the position's median volume, to avoid tiny-sample flukes). ` +
-    `Rank 1 = best. ${poolNotes.join(' · ')}. Median row shows the league median for each column; +/- Med shows each player's gap from it.` +
+    `Rank 1 = best. ${poolNotes.join(' · ')}. Median row shows the league median for each column; +/- Med shows each player's gap from it. ` +
+    `SOS Rank (1 = easiest) is each team's 2026 schedule graded by how many points that position's opponents have historically allowed (2024-2025) - ` +
+    `not an external power ranking, since none is loaded. Late SOS Rank uses only weeks ${LATE_SEASON_WEEKS.join('/')}. ` +
+    `Bye is each team's 2026 bye week. (SOS pool: ${sosRankFull.poolSize} teams full season, ${sosRankLate.poolSize} teams late season.)` +
     (activeSeasons.includes(PROJECTION_SEASON) ? ` Orange 2026 figures still include a projection and will update as real weeks load.` : '');
 
   // median (across currently displayed rows) for the total/avg columns, per season,
@@ -1961,7 +2068,7 @@ function renderPositionTab() {
   if (!posSortState.key) posSortState.key = `total_${latestSeason}`;
   rows = [...rows].sort((a, b) => ((Number(a[posSortState.key]) || 0) - (Number(b[posSortState.key]) || 0)) * posSortState.dir);
 
-  const cols = ['full_name', 'team',
+  const cols = ['full_name', 'team', 'bye', 'sos_rank', 'sos_rank_late',
     ...activeSeasons.map(s => `total_${s}`),
     ...activeSeasons.map(s => `avg_${s}`),
     ...activeSeasons.map(s => `diff_${s}`),
@@ -1969,6 +2076,9 @@ function renderPositionTab() {
     ...activeSeasons.map(s => `opprank_${s}`),
     ...activeSeasons.map(s => `successrank_${s}`)];
   const posLabels = {};
+  posLabels['bye'] = 'Bye';
+  posLabels['sos_rank'] = 'SOS Rank';
+  posLabels['sos_rank_late'] = `Late SOS Rank`;
   activeSeasons.forEach(s => {
     posLabels[`diff_${s}`] = `+/- Lg Avg ${s}`;
     posLabels[`medDiff_${s}`] = `+/- Med ${s}`;
@@ -1977,7 +2087,7 @@ function renderPositionTab() {
   });
 
   // build a synthetic "League Median" row pinned at the top, then the sortable player rows
-  const medianRow = { full_name: `League Median — ${pos}`, team: '', _isMedianRow: true };
+  const medianRow = { full_name: `League Median — ${pos}`, team: '', bye: null, sos_rank: null, sos_rank_late: null, _isMedianRow: true };
   activeSeasons.forEach(s => {
     medianRow[`total_${s}`] = medianBySeason[s].total;
     medianRow[`avg_${s}`] = medianBySeason[s].avg;
@@ -1988,6 +2098,7 @@ function renderPositionTab() {
   });
 
   const colorCols = [
+    'sos_rank', 'sos_rank_late',
     ...activeSeasons.map(s => `total_${s}`), ...activeSeasons.map(s => `avg_${s}`),
     ...activeSeasons.map(s => `diff_${s}`), ...activeSeasons.map(s => `medDiff_${s}`),
     ...activeSeasons.map(s => `opprank_${s}`), ...activeSeasons.map(s => `successrank_${s}`)
@@ -2601,12 +2712,32 @@ function renderPlayerDetail(playerId) {
   const refSeason = '2025';
   const refLabel = mode === 'total' ? `${refSeason} Lg Median` : 'Lg Median';
 
+  // 2026 bye week + strength of schedule, for this player's team/position
+  const byeWeek = getTeamByeWeek(p.team);
+  const sosFull = computeSOSRankMap(p.position);
+  const sosLate = computeSOSRankMap(p.position, LATE_SEASON_WEEKS);
+  const sosRank = sosFull.rankMap.get(p.team) || null;
+  const sosRankLate = sosLate.rankMap.get(p.team) || null;
+  const sosBadge = (label, rank, poolSize) => {
+    if (!rank || !poolSize) return '';
+    const t = poolSize > 1 ? 1 - (rank - 1) / (poolSize - 1) : 0.5; // rank 1 = best = green
+    const bg = colorFromT(t, 0.35);
+    return `<span class="team-tag" style="background:${bg};color:var(--text);padding:2px 8px;border-radius:4px;">${label}: ${rank}/${poolSize}</span>`;
+  };
+
   let html = `
     <div class="player-header">
       <h2>${p.full_name}</h2>
       <span class="pos-tag">${p.position}</span>
       <span class="team-tag">${p.team}</span>
+      ${byeWeek ? `<span class="team-tag">Bye: Wk ${byeWeek}</span>` : ''}
+      ${sosBadge('SOS Rank', sosRank, sosFull.poolSize)}
+      ${sosBadge('Late SOS Rank', sosRankLate, sosLate.poolSize)}
     </div>
+    ${(byeWeek || sosRank) ? `<p class="empty-note" style="text-align:left;padding:2px 0 6px;">
+      SOS Rank (1 = easiest) grades this team's 2026 schedule by how many points ${p.position}s have historically
+      scored against each opponent (2024-2025). Late SOS Rank uses only weeks ${LATE_SEASON_WEEKS.join('/')}.
+      Not an external power ranking &ndash; derived from loaded data.</p>` : ''}
     ${state.schedule.size ? `<p class="empty-note" style="text-align:left;padding:6px 0;">
       <span style="color:#e8973f;">Orange text</span> = 2026 figures still include a projection (based on 2024-2025
       history, adjusted for this player's opponents and their own history against them) &ndash; they'll be replaced
