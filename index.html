@@ -90,6 +90,18 @@
   }
   .file-chip.ok{color:var(--turf-bright);border-color:var(--turf);}
 
+  /* ---- dashboard buttons ---- */
+  .dash-nav{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px;}
+  .dash-btn{
+    font-family:'Teko',sans-serif;font-size:20px;letter-spacing:2px;font-weight:600;line-height:1;
+    background:var(--panel);border:1px solid var(--line);color:var(--text);
+    padding:10px 20px;border-radius:6px;text-transform:uppercase;text-decoration:none;
+    transition:all .15s;
+  }
+  .dash-btn:hover{background:var(--turf);color:#08130a;border-color:var(--turf);}
+  .dash-btn:focus-visible{outline:2px solid var(--gold);outline-offset:2px;}
+  @media(max-width:520px){.dash-btn{flex:1 1 100%;text-align:center;}}
+
   /* ---- tabs ---- */
   .tabs{display:flex;gap:6px;margin:8px 0 20px;}
   .tab-btn{
@@ -249,11 +261,16 @@
 <body>
 <div class="wrap">
 
+  <nav class="dash-nav no-print" aria-label="Dashboards">
+    <a class="dash-btn" href="edge.html">NFL Dashboard</a>
+    <a class="dash-btn" href="https://halfwitty.github.io/NHLDashboard/">NHL Dashboard</a>
+    <a class="dash-btn" href="https://halfwitty.github.io/NBADashboard/">NBA Dashboard</a>
+  </nav>
+
   <header>
     <div>
       <h1>THE STAT <span>SHEET</span></h1>
       <div class="subtitle">Sleeper NFL Data Explorer &middot; 2022&ndash;2026</div>
-      <div class="subtitle"><a href="edge.html" style="color:inherit;font-weight:700;">NFL Edge Board &rarr; betting picks, fair odds &amp; track record</a></div>
     </div>
   </header>
   <div id="statusLine" class="status-line">No data loaded yet.</div>
