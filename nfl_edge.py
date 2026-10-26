@@ -17,6 +17,10 @@ Usage:
     pip install requests pandas numpy
     python nfl_edge.py              # run from the FootballFriend repo folder
 
+For games not yet played it also reads current rosters, injuries and depth charts (Sleeper's player
+feed and ESPN's injury report), picks the healthy starting QB, removes injured players from the props
+and adjusts the projected score for QB changes.
+
 Each week: run pull_2026_stats.py first (fresh stats), then this script.
 """
 
@@ -24,8 +28,10 @@ import base64
 import hashlib
 import html
 import io
+import json
 import math
 import os
+import re
 import time
 from datetime import datetime
 
@@ -36,6 +42,20 @@ import requests
 # ------------------------------------------------------------------
 # CONFIG
 # ------------------------------------------------------------------
+# --- live player status (injuries, current rosters, depth charts) for games not yet played ---
+USE_LIVE_STATUS = True
+SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
+ESPN_INJURIES_URL = "https://site.api.espn.com/apis/site/v2/sports/football/nfl/injuries"
+STATUS_MAX_AGE_HOURS = 3      # re-download player status if the cached copy is older than this
+# --- starting QB adjustment (fit on 2024-2026: ~4.7 pts of margin per net yard per dropback; 75% of that used) ---
+QB_PTS_PER_NYA = 3.5          # margin points per 1.0 net yards/dropback between tonight's QB and the rated one
+QB_OWN_SHARE = 0.785          # share of that applied to the QB's own team's points (rest to the opponent's)
+QB_REPL_NYA = 4.0             # replacement-level net yards per dropback (QBs with little history shrink to this)
+QB_PRIOR_DB = 150             # dropbacks of replacement play mixed into every QB's value
+QB_HALF_LIFE_GAMES = 8
+QB_ADJ_CAP = 10.0
+PLAY_PROB = {"out": 0.0, "doubtful": 0.15, "questionable": 0.75, "active": 1.0}
+
 SEASON = 2026
 TARGET_WEEK = None        # None = the first week with unplayed games. Set a number to rebuild a past week.
 FIRST_GRADED_WEEK = 2     # track record covers weeks FIRST_GRADED_WEEK..target (walk-forward)
@@ -46,6 +66,7 @@ GAMES_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/game
 OUTPUT_HTML = "edge.html"
 LOG_CSV = "nfl_data/predictions_log.csv"
 SITE_LINK = "index.html"  # link back to The Stat Sheet
+STATUS_CACHE_DIR = "nfl_data"
 
 # --- team model (tuned on the 2025 season only, never on 2026) ---
 HALF_LIFE_WEEKS = 6       # a game's weight halves every N weeks
@@ -204,6 +225,221 @@ def add_xpts(tg, coef):
     tg["xpf"] = np.where(tg.has_box, x, tg.pf)
     opp = tg[["game_id", "team", "xpf"]].rename(columns={"team": "opp", "xpf": "xpa"})
     return tg.merge(opp, on=["game_id", "opp"], how="left")
+
+
+# ==================================================================
+# LIVE PLAYER STATUS: injuries, current team, depth chart
+# ==================================================================
+ESPN_TO_NFLVERSE = {"WSH": "WAS", "LAR": "LA", "JAC": "JAX"}
+OUT_WORDS = ("out", "injured reserve", "ir", "pup", "physically unable", "non football", "non-football",
+             "suspen", "sus", "na", "cov", "dnr", "reserve")
+SEVERITY = {"active": 0, "questionable": 1, "doubtful": 2, "out": 3}
+
+
+def _status_cat(*labels):
+    cat = "active"
+    for lab in labels:
+        t = str(lab or "").strip().lower()
+        if not t or t in ("active", "healthy", "none", "nan"):
+            continue
+        if t.startswith("doubt"):
+            c = "doubtful"
+        elif t.startswith("quest") or "day-to-day" in t or t.startswith("probable"):
+            c = "questionable"
+        elif any(t == w or t.startswith(w) for w in OUT_WORDS):
+            c = "out"
+        else:
+            c = "active"
+        if SEVERITY[c] > SEVERITY[cat]:
+            cat = c
+    return cat
+
+
+def _norm_name(n):
+    n = re.sub(r"[^a-z ]", "", str(n).lower().replace(".", ""))
+    n = re.sub(r"\b(jr|sr|ii|iii|iv|v)\b", "", n)
+    return " ".join(n.split())
+
+
+def _get_json(url, path):
+    """Download JSON (cached on disk); returns None on failure."""
+    fresh = os.path.exists(path) and time.time() - os.path.getmtime(path) < STATUS_MAX_AGE_HOURS * 3600
+    if not fresh:
+        try:
+            r = requests.get(url, timeout=60, headers={"User-Agent": "Mozilla/5.0 (nfl-edge)"})
+            if r.status_code == 200 and r.content:
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+                with open(path, "wb") as f:
+                    f.write(r.content)
+        except requests.RequestException as e:
+            print(f"  [warn] {url}: {e.__class__.__name__}")
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+        except ValueError:
+            return None
+    return None
+
+
+def load_status():
+    """Current team, injury designation and depth chart for every skill player.
+
+    Sleeper (same player ids as the stats files) is the main source; ESPN's league injury
+    report is merged in by name and the more serious designation wins. Returns None if both fail.
+    """
+    if not USE_LIVE_STATUS:
+        return None
+    sl = _get_json(SLEEPER_PLAYERS_URL, os.path.join(STATUS_CACHE_DIR, "sleeper_players.json"))
+    es = _get_json(ESPN_INJURIES_URL, os.path.join(STATUS_CACHE_DIR, "espn_injuries.json"))
+    if not sl and not es:
+        return None
+    st = {"players": {}, "by_name": {}, "sources": []}
+    if isinstance(sl, dict) and sl:
+        st["sources"].append("Sleeper")
+        # keep a slim copy on disk (the full file is ~10 MB)
+        for pid, x in sl.items():
+            pos = x.get("position")
+            if pos not in ("QB", "RB", "WR", "TE"):
+                continue
+            team = x.get("team")
+            team = SLEEPER_TO_NFLVERSE.get(team, team) if team else None
+            rec = {"pid": str(pid), "name": x.get("full_name") or f"{x.get('first_name', '')} {x.get('last_name', '')}".strip(),
+                   "team": team, "pos": pos, "cat": _status_cat(x.get("injury_status"), x.get("status") if x.get("status") != "Inactive" or team else None),
+                   "label": x.get("injury_status") or (x.get("status") if x.get("status") not in ("Active", None) else ""),
+                   "detail": " ".join(str(v) for v in (x.get("injury_body_part"), x.get("injury_notes")) if v) or "",
+                   "depth_pos": x.get("depth_chart_position"), "depth": x.get("depth_chart_order"),
+                   "src": "Sleeper"}
+            st["players"][rec["pid"]] = rec
+            st["by_name"].setdefault((_norm_name(rec["name"]), team), rec["pid"])
+    if isinstance(es, dict) and es.get("injuries") is not None:
+        st["sources"].append("ESPN")
+        for t in es.get("injuries", []):
+            for x in t.get("injuries") or []:
+                a = x.get("athlete") or {}
+                pos = ((a.get("position") or {}).get("abbreviation")) or ""
+                team = ((a.get("team") or {}).get("abbreviation")) or t.get("abbreviation") or ""
+                team = ESPN_TO_NFLVERSE.get(team, team)
+                if not team and t.get("displayName"):
+                    team = next((k for k, v in TEAM_NAMES.items() if v == t["displayName"]), "")
+                lab = x.get("status") or (x.get("type") or {}).get("description") or ""
+                cat = _status_cat(lab)
+                det = x.get("details") or {}
+                detail = " ".join(v for v in (det.get("type"), det.get("detail")) if v and v != "Not Specified")
+                key = (_norm_name(a.get("displayName")), team)
+                pid = st["by_name"].get(key)
+                if pid is None:
+                    pid = f"espn:{key[0]}:{team}"
+                    if pos and pos not in ("QB", "RB", "WR", "TE"):
+                        continue
+                    st["players"][pid] = {"pid": pid, "name": a.get("displayName"), "team": team, "pos": pos,
+                                          "cat": "active", "label": "", "detail": "", "depth_pos": None, "depth": None,
+                                          "src": "ESPN"}
+                rec = st["players"][pid]
+                if SEVERITY[cat] > SEVERITY[rec["cat"]]:
+                    rec["cat"], rec["label"] = cat, lab
+                    rec["src"] = "ESPN"
+                if detail and not rec["detail"]:
+                    rec["detail"] = detail
+                rec["note"] = x.get("shortComment") or rec.get("note", "")
+    n_out = sum(1 for r in st["players"].values() if r["cat"] != "active" and r["team"])
+    print(f"  Player status from {' + '.join(st['sources'])}: {n_out} players listed out, doubtful or questionable")
+    return st
+
+
+def team_injuries(status, team):
+    if not status:
+        return []
+    out = [r for r in status["players"].values() if r["team"] == team and r["cat"] != "active"]
+    return sorted(out, key=lambda r: (-SEVERITY[r["cat"]], ["QB", "RB", "WR", "TE"].index(r["pos"]) if r["pos"] in ("QB", "RB", "WR", "TE") else 9))
+
+
+# ==================================================================
+# QUARTERBACKS: who starts, and how much the change is worth
+# ==================================================================
+class QBBook:
+    """Per-QB value (net yards per dropback, shrunk to replacement) and who started each past game."""
+
+    def __init__(self, st):
+        q = st[(st.position == "QB") & ((st.pass_att + st.pass_sack) > 0)].copy()
+        q["db"] = q.pass_att + q.pass_sack
+        q["num"] = q.pass_yd + 20 * q.pass_td - 45 * q.pass_int
+        q["ord"] = q.season * 25 + q.week
+        self.q = q.sort_values("ord")
+        top = q.sort_values("db").groupby(["season", "week", "team"]).tail(1)
+        top = top[top.db >= 10]
+        self.starter = {(r.season, r.week, r.team): r.player_id for r in top.itertuples()}
+        self._cache = {}
+
+    def value(self, pid, ordt):
+        key = (pid, ordt)
+        if key not in self._cache:
+            h = self.q[(self.q.player_id == pid) & (self.q.ord < ordt)]
+            w = 0.5 ** (np.arange(len(h))[::-1] / QB_HALF_LIFE_GAMES)
+            self._cache[key] = float((np.sum(w * h.num.values) + QB_PRIOR_DB * QB_REPL_NYA) /
+                                     (np.sum(w * h.db.values) + QB_PRIOR_DB))
+        return self._cache[key]
+
+    def dropbacks(self, pid, ordt):
+        h = self.q[(self.q.player_id == pid) & (self.q.ord < ordt)]
+        return float(h.db.sum())
+
+    def rated_value(self, tg, team, season, week):
+        """QB value the team's rating was built on: rating-weighted average of each past game's starter."""
+        ordt = season * 25 + week
+        d = tg[(tg.ord < ordt) & (tg.season >= season - SEASONS_BACK) & (tg.team == team)]
+        if d.empty:
+            return QB_REPL_NYA
+        sb = (season - d.season).values
+        age = np.where(sb == 0, week - d.week.values,
+                       week + np.maximum(0, 18 - d.week.values) + 18 * np.maximum(sb - 1, 0))
+        w = 0.5 ** (age / HALF_LIFE_WEEKS) * LAST_SEASON_WEIGHT ** sb
+        vals, ws = [], []
+        for wi, a in zip(w, d.itertuples()):
+            pid = self.starter.get((a.season, a.week, team))
+            if pid:
+                vals.append(self.value(pid, ordt))
+                ws.append(wi)
+        return float(np.average(vals, weights=ws)) if vals else QB_REPL_NYA
+
+
+def pick_starting_qb(st, status, team, season, week, feed_name=None):
+    """Healthy QB most likely to start: depth chart #1, else the nflverse name, else most recent starter."""
+    ordt = season * 25 + week
+    pool = st[(st.position == "QB") & (st.season * 25 + st.week < ordt) & (st.season >= season - 1)]
+    recent = pool[pool.team == team].sort_values(["season", "week"])
+    cand = {}
+    if status:
+        for r in status["players"].values():
+            if r["team"] == team and r["pos"] == "QB" and not str(r["pid"]).startswith("espn:"):
+                cand[r["pid"]] = r
+    healthy = {pid: r for pid, r in cand.items() if r["cat"] in ("active", "questionable")}
+    if healthy:
+        dc = sorted((r for r in healthy.values() if r.get("depth_pos") == "QB" and r.get("depth")),
+                    key=lambda r: r["depth"])
+        if dc:
+            return dc[0]["pid"], dc[0]["name"], "depth chart"
+        if feed_name:
+            for pid, r in healthy.items():
+                if _norm_name(r["name"]) == _norm_name(feed_name):
+                    return pid, r["name"], "schedule feed"
+        if not recent.empty:
+            atts = recent[recent.player_id.isin(healthy)].groupby("player_id").pass_att.sum()
+            if len(atts):
+                pid = atts.idxmax()
+                return pid, healthy[pid]["name"], "most recent starts"
+        pid, r = next(iter(healthy.items()))
+        return pid, r["name"], "roster"
+    # no status data: fall back to the old behaviour
+    if feed_name and not recent.empty:
+        hit = recent[recent.full_name == feed_name]
+        if len(hit):
+            return hit.player_id.iloc[-1], feed_name, "schedule feed"
+    if not recent.empty:
+        last = recent[recent.pass_att >= 10]
+        if len(last):
+            return last.player_id.iloc[-1], last.full_name.iloc[-1], "most recent starts"
+    return None, feed_name, "schedule feed"
 
 
 # ==================================================================
@@ -400,11 +636,20 @@ def defense_factors(st, season, week):
     return out
 
 
-def project_players(st, season, week, game_rows, team_pts, team_avg_pts, def_f):
-    """Projections for every likely-active skill player in this week's games."""
+def project_players(st, season, week, game_rows, team_pts, team_avg_pts, def_f, status=None, live_ids=(),
+                    starters=None):
+    """Projections for every likely-active skill player in this week's games.
+
+    For games not yet played, `status` (live injuries, current teams, depth charts) decides who plays:
+    players ruled out, on IR, doubtful, or now on another team are dropped, their targets and carries go
+    to the teammates who are left, and the QB is the healthy starter rather than whoever the schedule
+    feed lists. Finished games keep the old rule (anyone who played in the team's last two games).
+    """
     pool = player_pool(st, season, week)
+    starters = starters or {}
     rows = []
     for _, gm in game_rows.iterrows():
+        live = status is not None and gm.game_id in live_ids
         for team, opp, qb_name in ((gm.home_team, gm.away_team, gm.get("home_qb_name")),
                                    (gm.away_team, gm.home_team, gm.get("away_qb_name"))):
             tp = pool[pool.team == team]
@@ -412,18 +657,35 @@ def project_players(st, season, week, game_rows, team_pts, team_avg_pts, def_f):
                 continue
             recent = tp[tp.season == tp.season.max()]
             last_weeks = sorted(recent.week.unique())[-2:]
-            active = recent[recent.week.isin(last_weeks)]
+            active_ids = set(recent[recent.week.isin(last_weeks)].player_id)
+            if live:
+                # add players now on this team's depth chart who have history elsewhere (trades, signings)
+                for r in status["players"].values():
+                    if r["team"] == team and r.get("depth") and r["depth"] <= (3 if r["pos"] == "WR" else 2) \
+                            and r["pid"] in set(pool.player_id):
+                        active_ids.add(r["pid"])
             ratio = team_pts[team] / max(team_avg_pts.get(team, team_pts[team]), 10)
-            for pid, pr in active.groupby("player_id"):
+            qb_pid = starters.get(team) if live else None
+            team_rows, missing = [], []
+            for pid in active_ids:
                 hist = pool[pool.player_id == pid]
+                if hist.empty:
+                    continue
                 hist = hist[hist.team == team] if hist[hist.team == team].shape[0] >= 2 else hist
                 pos = hist.position.iloc[-1]
                 name = hist.full_name.iloc[-1]
+                stat_rec = status["players"].get(pid) if live else None
+                cat = stat_rec["cat"] if stat_rec else "active"
+                if live and stat_rec and stat_rec["team"] and stat_rec["team"] != team:
+                    continue                                  # no longer on this team
                 if pos == "QB":
-                    if qb_name and isinstance(qb_name, str):
+                    if live and qb_pid:
+                        if pid != qb_pid or qb_starts(st, pid, season, week) < 4:
+                            continue                          # a lightly-used starter is projected below
+                    elif qb_name and isinstance(qb_name, str):
                         if name != qb_name:
                             continue
-                    elif pr.pass_att.max() < 10:
+                    elif recent[recent.player_id == pid].pass_att.max() < 10:
                         continue
                 n = len(hist)
                 ago = np.arange(n)[::-1]
@@ -434,18 +696,84 @@ def project_players(st, season, week, game_rows, team_pts, team_avg_pts, def_f):
                 cur = hist[hist.season == season]
                 naive_src = cur if len(cur) else hist
                 info = {"player_id": pid, "name": name, "pos": pos, "team": team, "opp": opp,
-                        "game_id": gm.game_id, "gp": len(cur),
-                        "touches": touches, "proj": {}, "naive": {}}
+                        "game_id": gm.game_id, "gp": len(cur), "status": cat,
+                        "status_label": (stat_rec or {}).get("label", ""), "touches": touches, "proj": {}, "naive": {}}
                 for stat, (label, poss, kind, miles, gs_exp) in PROP_STATS.items():
                     if pos not in poss:
                         continue
                     base = float(np.average(hist[stat], weights=w))
                     f_opp = def_f.get((opp, stat, pos), 1.0)
-                    proj = base * f_opp * ratio ** gs_exp
-                    info["proj"][stat] = proj
+                    info["proj"][stat] = base * f_opp * ratio ** gs_exp
                     info["naive"][stat] = float(naive_src[stat].mean())
-                rows.append(info)
+                if live and cat in ("out", "doubtful"):
+                    missing.append(info)
+                else:
+                    team_rows.append(info)
+            if live and qb_pid and not any(r["pos"] == "QB" for r in team_rows):
+                q = qb_projection(st, pool, qb_pid, team, opp, gm.game_id, season, week, status, def_f, ratio)
+                if q:
+                    team_rows.append(q)
+            if live and missing:
+                redistribute(team_rows, missing)
+            rows += team_rows
     return rows
+
+
+def redistribute(team_rows, missing):
+    """Give missing players' receiving and rushing volume to the teammates who are left."""
+    for stats, poss, cap in ((("rec", "rec_yd"), ("RB", "WR", "TE"), 1.35), (("rush_yd",), ("RB",), 1.9)):
+        lost = sum(m["proj"].get(stats[-1], 0) for m in missing if m["pos"] in poss)
+        have = sum(r["proj"].get(stats[-1], 0) for r in team_rows if r["pos"] in poss)
+        if lost <= 0 or have <= 0:
+            continue
+        f = min(cap, 1 + lost / have)
+        for r in team_rows:
+            if r["pos"] in poss:
+                for s_ in stats:
+                    if s_ in r["proj"]:
+                        r["proj"][s_] *= f
+                if "td" in r["proj"]:
+                    r["proj"]["td"] *= 1 + (f - 1) * 0.6
+                r["boost"] = f
+    for r in team_rows:
+        r["replacing"] = [m["name"] for m in missing]
+
+
+def qb_starts(st, pid, season, week):
+    ordt = season * 25 + week
+    h = st[(st.player_id == pid) & (st.season * 25 + st.week < ordt) & (st.season >= season - 2)]
+    return int((h.pass_att >= 20).sum())
+
+
+def qb_projection(st, pool, pid, team, opp, gid, season, week, status, def_f, ratio):
+    """Projection for a QB with few starts: the team's usual pass attempts times his own (shrunk) efficiency."""
+    rec = status["players"].get(pid, {})
+    ordt = season * 25 + week
+    hist = st[(st.player_id == pid) & (st.season * 25 + st.week < ordt) & (st.season >= season - 2)]
+    tq = st[(st.team == team) & (st.position == "QB") & (st.season * 25 + st.week < ordt) & (st.season >= season - 1)]
+    by_wk = tq.groupby(["season", "week"])[["pass_att"]].sum().sort_index()
+    if by_wk.empty:
+        return None
+    w = 0.5 ** (np.arange(len(by_wk))[::-1] / PLAYER_HALF_LIFE)
+    att = float(np.average(by_wk.pass_att, weights=w))
+    a_, y_, t_ = hist.pass_att.sum(), hist.pass_yd.sum(), hist.pass_td.sum()
+    ypa = (y_ + 6.4 * 120) / (a_ + 120)            # shrunk toward a backup-level 6.4 yards per attempt
+    tdr = (t_ + 0.035 * 120) / (a_ + 120)
+    rush = hist[hist.pass_att >= 10]
+    base = {"pass_yd": att * ypa, "pass_td": att * tdr,
+            "rush_yd": float(rush.rush_yd.mean()) if len(rush) else 6.0,
+            "td": float(rush.rush_td.mean()) if len(rush) else 0.05}
+    played = hist[hist.pass_att >= 10]
+    info = {"player_id": pid, "name": rec.get("name") or (hist.full_name.iloc[-1] if len(hist) else pid), "pos": "QB",
+            "team": team, "opp": opp, "game_id": gid, "gp": int((played.season == season).sum()),
+            "status": rec.get("cat", "active"), "status_label": rec.get("label", ""), "touches": 0.0,
+            "proj": {}, "naive": {}, "new_starter": True}
+    for stat, (label, poss, kind, miles, gs_exp) in PROP_STATS.items():
+        if "QB" not in poss or stat not in base:
+            continue
+        info["proj"][stat] = base[stat] * def_f.get((opp, stat, "QB"), 1.0) * ratio ** gs_exp
+        info["naive"][stat] = base[stat]
+    return info
 
 
 def calib(p, k):
@@ -496,14 +824,45 @@ def team_total_probs(mu, line):
     return total_probs(mu, line, TEAM_SCORE_SD)
 
 
-def build_week(season, week, games, tg, st, md, with_props=True):
+def build_week(season, week, games, tg, st, md, with_props=True, status=None, qbb=None):
     r = fit_ratings(tg, season, week)
     wk_games = games[(games.season == season) & (games.week == week)].sort_values(["gameday", "gametime"])
     team_avg = {t: r["mu"] + r["off"][t] + r["hfa"] / 2 for t in r["teams"]}
     out_games, team_pts = [], {}
+    live_ids, starters = set(), {}
     for _, g in wk_games.iterrows():
         neutral = g.location == "Neutral"
         hp, ap = project_game(r, g.home_team, g.away_team, neutral)
+        qbinfo, inj = {}, {}
+        if status is not None and not g.done:
+            live_ids.add(g.game_id)
+            dv = {}
+            for team, feed in ((g.home_team, g.get("home_qb_name")), (g.away_team, g.get("away_qb_name"))):
+                pid, name, how = pick_starting_qb(st, status, team, season, week, feed if isinstance(feed, str) else None)
+                starters[team] = pid
+                ordt = season * 25 + week
+                rated = qbb.rated_value(tg, team, season, week) if qbb else QB_REPL_NYA
+                val = qbb.value(pid, ordt) if (qbb and pid) else QB_REPL_NYA
+                last = None
+                if qbb:
+                    for (s_, w_, t_), sp in sorted(qbb.starter.items(), key=lambda kv: kv[0][0] * 25 + kv[0][1]):
+                        if t_ == team and s_ * 25 + w_ < ordt:
+                            last = sp
+                last_name = None
+                if last:
+                    hit = st[st.player_id == last].full_name
+                    last_name = hit.iloc[-1] if len(hit) else None
+                dv[team] = val - rated
+                qbinfo[team] = {"pid": pid, "name": name, "how": how, "val": val, "rated": rated,
+                                "last": last_name, "changed": bool(last and pid and last != pid),
+                                "db": qbb.dropbacks(pid, ordt) if (qbb and pid) else 0.0}
+                inj[team] = team_injuries(status, team)
+            dh, da = dv[g.home_team], dv[g.away_team]
+            eh = max(-QB_ADJ_CAP, min(QB_ADJ_CAP, QB_PTS_PER_NYA * dh))
+            ea = max(-QB_ADJ_CAP, min(QB_ADJ_CAP, QB_PTS_PER_NYA * da))
+            hp += QB_OWN_SHARE * eh - (1 - QB_OWN_SHARE) * ea
+            ap += QB_OWN_SHARE * ea - (1 - QB_OWN_SHARE) * eh
+            qbinfo[g.home_team]["adj"], qbinfo[g.away_team]["adj"] = eh, ea
         m = (hp - ap) * MARGIN_SCALE
         hp, ap = (hp + ap) / 2 + m / 2, (hp + ap) / 2 - m / 2
         team_pts[g.home_team], team_pts[g.away_team] = hp, ap
@@ -543,17 +902,18 @@ def build_week(season, week, games, tg, st, md, with_props=True):
                 mk.append(make_market(gid, "Team total", f"{team} under {line:g}", team + "-u", u, p_, None, None,
                                       week, kind="pc", line=line))
         out_games.append({"g": g, "hp": hp, "ap": ap, "m": m, "tot": tot, "p_home": p_home, "p_tie": p_tie,
-                          "markets": mk, "props": []})
+                          "markets": mk, "props": [], "qb": qbinfo, "inj": inj})
     props = []
     if with_props and len(wk_games):
         df = defense_factors(st, season, week)
-        props = project_players(st, season, week, wk_games, team_pts, team_avg, df)
+        props = project_players(st, season, week, wk_games, team_pts, team_avg, df, status, live_ids, starters)
         by_game = {}
         for p in props:
             by_game.setdefault(p["game_id"], []).append(p)
         for og in out_games:
             og["props"] = by_game.get(og["g"].game_id, [])
-    return {"season": season, "week": week, "ratings": r, "games": out_games, "props": props}
+    return {"season": season, "week": week, "ratings": r, "games": out_games, "props": props,
+            "live": status is not None}
 
 
 def fmt_line(x):
@@ -929,6 +1289,29 @@ input.calc{width:72px;text-align:right}
 .calcrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:13px}
 .calcout{font-size:13px;margin-top:6px}
 .warnbox{background:var(--lean-bg);color:var(--lean);border-radius:10px;padding:10px 12px;font-size:13px;margin:10px 0}
+/* top bets: price bar layout */
+.bet{display:grid;grid-template-columns:48px 1fr auto;gap:4px 16px;padding:16px 18px;border-bottom:1px solid var(--line)}
+.bet:last-child{border-bottom:0}
+.bet .rank{font-size:32px;font-weight:800;line-height:1;color:var(--accent);text-align:right;font-variant-numeric:tabular-nums}
+.bet .head{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px}
+.bet .what{font-size:20px;font-weight:800;letter-spacing:-.01em}
+.bet .price{font-size:20px;font-weight:700;color:var(--muted)}
+.bet .meta{font-size:12.5px;color:var(--muted);margin:2px 0 4px}
+.bet .facts{display:flex;flex-wrap:wrap;gap:3px 18px;font-size:13px;color:var(--muted);margin-top:6px}
+.bet .facts b{color:var(--text)}
+.bet .why{font-size:13px;margin-top:6px;max-width:78ch}
+.bet .side{text-align:right;min-width:96px}
+.pbar{position:relative;max-width:520px;margin:8px 0 0}
+.pbar.mk{margin-top:26px}
+.pbar .track{display:flex;height:10px;border-radius:5px;overflow:hidden;background:var(--panel2)}
+.pbar .zv{background:var(--good)}.pbar .zl{background:var(--lean)}.pbar .za{background:var(--bad);opacity:.7;flex:1}
+.pbar .mark{position:absolute;top:-5px;width:3px;height:20px;border-radius:2px;background:var(--text);transform:translateX(-1px)}
+.pbar .mlab{position:absolute;top:-23px;transform:translateX(-50%);font-size:12.5px;font-weight:700;white-space:nowrap}
+.pbar .ticks{position:relative;height:18px;font-size:11.5px;color:var(--muted)}
+.pbar .ticks span{position:absolute;top:3px;transform:translateX(-50%);white-space:nowrap}
+@media (max-width:760px){.bet{grid-template-columns:28px 1fr;padding:14px 12px}.bet .rank{font-size:24px}
+ .bet .side{grid-column:2;text-align:left}.bet .what{font-size:18px}
+ .pbar .ticks{display:flex;gap:14px;height:auto;margin-top:4px}.pbar .ticks span{position:static;transform:none}}
 """
 
 
@@ -952,7 +1335,7 @@ def pct(p, d=0):
 def kickoff(g):
     try:
         dt = datetime.strptime(f"{g.gameday} {g.gametime}", "%Y-%m-%d %H:%M")
-        return dt.strftime("%a %-I:%M %p")
+        return dt.strftime("%a ") + f"{dt.hour % 12 or 12}:{dt.minute:02d} " + dt.strftime("%p")
     except Exception:
         return str(g.gameday)
 
@@ -989,45 +1372,97 @@ def odds_cell(mk, graded):
             f'value="{val}" title="Closing price (nflverse)"><div><span class="ev"></span></div></td>')
 
 
+def implied(am):
+    d = am_to_dec(am)
+    return 1 / d if d else None
+
+
+def price_bar(fair, bet_at, book=None):
+    """Value (green) / lean (amber) / avoid (red) zones in implied probability, book price marked."""
+    qb, qf = implied(bet_at), implied(fair)
+    if qb is None or qf is None:
+        return ""
+    lo, hi = max(0.01, qb - 0.09), min(0.99, qf + 0.07)
+    qk = implied(book) if book is not None and not (isinstance(book, float) and math.isnan(book)) else None
+    if qk is not None:
+        lo, hi = min(lo, qk - 0.02), max(hi, qk + 0.02)
+    span = hi - lo
+
+    def pos(q):
+        return max(0.0, min(100.0, (q - lo) / span * 100))
+    mark, cls = "", "pbar"
+    if qk is not None:
+        x = pos(qk)
+        mark = (f'<div class="mark" style="left:{x:.1f}%"></div>'
+                f'<div class="mlab" style="left:{min(92, max(8, x)):.1f}%">Book {fmt_am(book)}</div>')
+        cls += " mk"
+    aria = f"Value at {fmt_am(bet_at)} or better, lean down to {fmt_am(fair)}, avoid anything worse"
+    return (f'<div class="{cls}" role="img" aria-label="{aria}"><div class="track">'
+            f'<div class="zv" style="width:{pos(qb):.1f}%"></div><div class="zl" style="width:{pos(qf) - pos(qb):.1f}%"></div>'
+            f'<div class="za"></div></div>{mark}<div class="ticks">'
+            f'<span style="left:{min(88, max(10, pos(qb))):.1f}%">Bet at {fmt_am(bet_at)}</span>'
+            f'<span style="left:{min(90, max(30, pos(qf) + 6)):.1f}%">Fair {fmt_am(fair)}</span></div></div>')
+
+
+def pick_reason(og, mk):
+    g = og["g"]
+    bits = []
+    if mk["market"] in ("Moneyline", "Spread"):
+        bits.append(f"Model has {g.home_team} {fmt_line(-round(og['m'] * 2) / 2)} vs the market's {fmt_line(-g.spread_line)}")
+    elif mk["market"] == "Total":
+        bits.append(f"Model total {og['tot']:.1f} vs {g.total_line:g}")
+    for t in (g.away_team, g.home_team):
+        q = (og.get("qb") or {}).get(t)
+        if q and abs(q.get("adj", 0)) >= 1.0:
+            bits.append(f"{t} QB {q['name']} ({q['adj']:+.1f} pts vs the QB play in {t}'s rating)")
+        outs = [r["name"] for r in (og.get("inj") or {}).get(t, []) if r["cat"] in ("out", "doubtful") and r["pos"] != "QB"]
+        if outs:
+            bits.append(f"{t} without {', '.join(outs[:3])}")
+    return ". ".join(bits) + "." if bits else ""
+
+
 def render_pick(i, og, mk):
     g = og["g"]
     tag = '<span class="tag hp">High probability</span>' if mk["tag"] == "hp" else '<span class="tag va">Value</span>'
-    right = (f'<div class="pk-price">{fmt_am(mk["price"])}</div>'
-             f'<div class="pk-meta">{"Closing line" if g.done else "Latest line"}</div>')
+    if mk["tag"] == "hp" and mk.get("ev_lo") is not None and mk["ev_lo"] > 0:
+        tag = '<span class="tag hp">High probability + value</span>'
+    side = ""
     if mk.get("out") is not None:
-        pl = mk["pl"]
-        right += f'<div style="margin-top:6px">{res_badge(mk["out"])}</div>' \
-                 f'<div class="pk-meta">{pl:+.2f}u</div>'
+        side = f'{res_badge(mk["out"])}<div class="pk-meta">{mk["pl"]:+.2f}u</div>'
     else:
-        right += ('<div style="margin-top:6px"><input class="odds" placeholder="price" aria-label="Your price">'
-                  '<div><span class="ev"></span></div></div>')
-    final = f' &middot; Final {g.away_team} {g.away_score:.0f} - {g.home_team} {g.home_score:.0f}' if g.done else ""
-    return (f'<div class="pick" data-p="{mk["p"]:.4f}" data-lo="{mk["lo"]:.4f}"><div class="rk">{i}</div><div>'
-            f'<div>{tag}<span class="pk-meta">{kickoff(g)} &middot; {g.away_team} @ {g.home_team} &middot; {mk["market"]}</span></div>'
-            f'<div class="pk-bet">{E_(mk["label"])}</div><div class="pk-nums"><span>Model <b>{pct(mk["p"])}</b></span>'
-            f'<span>Market <b>{pct(mk["mkt"])}</b></span><span>Fair <b>{fmt_am(mk["fair"])}</b></span>'
-            f'<span>Bet at <b class="good">{fmt_am(mk["bet_at"])}</b> or better</span></div>'
-            f'<div class="note" style="margin-top:4px">Projected {g.away_team} {og["ap"]:.1f} - {g.home_team} {og["hp"]:.1f}'
-            f' &middot; market spread {fmt_line(-g.spread_line)} {g.home_team}, total {g.total_line:g}{final}</div></div>'
-            f'<div class="pk-right">{right}</div></div>')
+        side = ('<div class="pk-meta">Your price</div><input class="odds" placeholder="price" aria-label="Your price">'
+                '<div><span class="ev"></span></div>')
+    final = f'. Final {g.away_team} {g.away_score:.0f}, {g.home_team} {g.home_score:.0f}' if g.done else ""
+    ev = f'{mk["ev"] * 100:+.1f}%' if mk.get("ev") is not None else "-"
+    return (f'<div class="bet" data-p="{mk["p"]:.4f}" data-lo="{mk["lo"]:.4f}"><div class="rank">{i}</div><div>'
+            f'<div class="head"><span class="what">{E_(mk["label"])}</span><span class="price">{fmt_am(mk["price"])}</span>{tag}</div>'
+            f'<div class="meta">{g.away_team} at {g.home_team}, {kickoff(g)}. {mk["market"]}, '
+            f'{"closing line" if g.done else "latest line"}{final}</div>'
+            f'{price_bar(mk["fair"], mk["bet_at"], mk["price"])}'
+            f'<div class="facts"><span>Win chance <b>{pct(mk["p"])}</b></span><span>Market <b>{pct(mk["mkt"])}</b></span>'
+            f'<span>Expected return <b>{ev}</b></span><span>Bet down to <b>{fmt_am(mk["bet_at"])}</b></span></div>'
+            f'<div class="why">{E_(pick_reason(og, mk))} Projected {g.away_team} {og["ap"]:.1f}, {g.home_team} {og["hp"]:.1f}.</div>'
+            f'</div><div class="side">{side}</div></div>')
 
 
 def render_check(i, it):
     g = it["og"]["g"]
-    right = f'<div class="pk-meta">Bet at</div><div class="pk-price good">{fmt_am(prob_to_am(it["lo"]))}</div>'
+    fair, bet_at = prob_to_am(it["p"]), prob_to_am(it["lo"])
     if it.get("out") is not None:
         badge = {1.0: '<span class="res w">HIT</span>', 0.5: '<span class="res p">PUSH</span>'}.get(
             it["out"], '<span class="res l">MISS</span>')
         act = f'actual {it["actual"]:g}' if it.get("actual") is not None else ""
-        right += f'<div style="margin-top:6px">{badge}</div><div class="pk-meta">{act}</div>'
+        side = f'{badge}<div class="pk-meta">{act}</div>'
     else:
-        right += ('<div style="margin-top:6px"><input class="odds" placeholder="price" aria-label="Your price">'
-                  '<div><span class="ev"></span></div></div>')
-    return (f'<div class="pick" data-p="{it["p"]:.4f}" data-lo="{it["lo"]:.4f}"><div class="rk">{i}</div><div>'
-            f'<div><span class="tag pc">Price check</span><span class="pk-meta">{kickoff(g)} &middot; {g.away_team} @ {g.home_team} &middot; {it["market"]}</span></div>'
-            f'<div class="pk-bet">{E_(it["label"])}</div><div class="pk-nums"><span>Model <b>{pct(it["p"])}</b></span>'
-            f'<span>Fair <b>{fmt_am(prob_to_am(it["p"]))}</b></span><span>Bet at <b class="good">{fmt_am(prob_to_am(it["lo"]))}</b> or better</span></div>'
-            f'<div class="note" style="margin-top:4px">{it["note"]}</div></div><div class="pk-right">{right}</div></div>')
+        side = ('<div class="pk-meta">Your price</div><input class="odds" placeholder="price" aria-label="Your price">'
+                '<div><span class="ev"></span></div>')
+    return (f'<div class="bet" data-p="{it["p"]:.4f}" data-lo="{it["lo"]:.4f}"><div class="rank">{i}</div><div>'
+            f'<div class="head"><span class="what">{E_(it["label"])}</span><span class="tag pc">Price check</span></div>'
+            f'<div class="meta">{g.away_team} at {g.home_team}, {kickoff(g)}. {it["market"]}</div>'
+            f'{price_bar(fair, bet_at)}'
+            f'<div class="facts"><span>Win chance <b>{pct(it["p"])}</b></span><span>Fair <b>{fmt_am(fair)}</b></span>'
+            f'<span>Bet down to <b>{fmt_am(bet_at)}</b></span></div>'
+            f'<div class="why">{it["note"]}</div></div><div class="side">{side}</div></div>')
 
 
 def long_run_note(long_run):
@@ -1050,7 +1485,8 @@ def render_top(wk_list, note=""):
            f'{HIGH_PROB:.0%}+ where the price beats fair odds, and <span class="tag va">Value</span> bets where the price '
            'beats the cautious <b>Bet at</b> price. At most 2 bets per game, never two on the same side or total, and '
            f'never when the model is more than {MAX_MARKET_GAP:.0%} away from the market. Prices are the closing lines '
-           'from nflverse; type your own book\'s price to re-check.</p>']
+           'from nflverse; type your own book\'s price to re-check. On each price bar, green is a good price, amber a thin '
+           'one and red a pass; the black mark is the book\'s price.</p>']
     for wk, title in wk_list:
         picks = wk["picks"]
         out.append(f'<h2>{title}</h2>')
@@ -1141,6 +1577,12 @@ def render_props(og, graded, week):
             opts.append(f'<option data-k="{kind}" data-m="{mean:.3f}" data-sd="{sd:.3f}">{E_(p["name"])} &middot; {lab}'
                         f' (proj {txt})</option>')
         dnp = ' <span class="pill">DNP</span>' if graded and og["g"].done and not p.get("actual") else ""
+        if p.get("status") == "questionable":
+            dnp += f' <span class="pill warn">{E_(p.get("status_label") or "Questionable")}</span>'
+        if p.get("new_starter"):
+            dnp += ' <span class="pill warn">starting</span>'
+        if p.get("boost", 1) > 1.04:
+            dnp += f' <span class="pill" title="Share of missing teammates\' volume">+{(p["boost"] - 1) * 100:.0f}% vol.</span>'
         rows.append(f'<tr><td class="l">{E_(p["name"])} <span class="sub">{p["pos"]}</span>{dnp}</td>{"".join(cells)}</tr>')
     calc = ""
     if opts:
@@ -1149,10 +1591,35 @@ def render_props(og, graded, week):
                 f'<select class="calc">{"".join(opts)}</select><span>line</span><input class="calc ln" placeholder="e.g. 54.5">'
                 f'<span>over</span><input class="calc po" placeholder="-115"><span>under</span><input class="calc pu" placeholder="-115">'
                 f'</div><div class="calcout"></div></div></div>')
+    live = any("status" in p and p.get("status") is not None for p in props) and og.get("inj") is not None and len(og.get("inj", {})) > 0
     note = '<div class="note">Projections, not sportsbook lines. Grey numbers under a projection are what happened.</div>' if graded else \
-        '<div class="note">Players who saw the field in either of the team\'s last two games. Check injury reports before betting.</div>'
+        ('<div class="note">Active players per the latest injury report and depth charts (Sleeper and ESPN, as of this run). '
+         'Re-run close to kickoff for late scratches.</div>' if live else
+         '<div class="note">Players who saw the field in either of the team\'s last two games. Injury data wasn\'t available '
+         'this run, so check injury reports before betting.</div>')
     return (f'<h3>Player projections</h3><div class="tw"><table><thead><tr><th>Player</th>{head}</tr></thead><tbody>'
             + "".join(rows) + f'</tbody></table></div>{note}{calc}')
+
+
+def render_injuries(og):
+    if not og.get("inj"):
+        return ""
+    g = og["g"]
+    cols = []
+    for t in (g.away_team, g.home_team):
+        rows = og["inj"].get(t, [])
+        if not rows:
+            cols.append(f'<div class="box"><div class="sub">{t}</div><div class="note">No skill players listed.</div></div>')
+            continue
+        items = "".join(
+            f'<div class="kv"><span>{E_(r["name"])} <span class="sub">{r["pos"]}</span>'
+            f'{(" &middot; " + E_(r["detail"])) if r.get("detail") else ""}</span>'
+            f'<b class="{"bad" if r["cat"] in ("out", "doubtful") else "lean"}">{E_(r["label"] or r["cat"].title())}</b></div>'
+            for r in rows[:10])
+        cols.append(f'<div class="box"><div class="sub">{t}</div>{items}</div>')
+    return ('<h3>Injuries (QB, RB, WR, TE)</h3><div class="grid2">' + "".join(cols) + '</div>'
+            '<div class="note">Out, IR and doubtful players are removed from the projections and their targets and carries '
+            'go to teammates. Questionable players stay in, tagged.</div>')
 
 
 def render_game(og, rec, r, graded, week):
@@ -1167,7 +1634,21 @@ def render_game(og, rec, r, graded, week):
         teams.append(f'<div class="tline">{logo(t)}<span class="ab">{t}</span><span class="pill">{fmt_rec(rec.get(t))}</span>'
                      f'<span class="nm">{TEAM_NAMES.get(t, "")}</span>{sc}<span style="margin-left:auto;font-weight:700">{pct(p)}</span></div>')
     qb = ""
-    if isinstance(g.get("away_qb_name"), str):
+    if og.get("qb"):
+        parts = []
+        for t in (g.away_team, g.home_team):
+            q = og["qb"][t]
+            note = ""
+            outs = [r for r in og["inj"].get(t, []) if r["pos"] == "QB" and r["cat"] in ("out", "doubtful")]
+            if outs:
+                note = f' (for {E_(outs[0]["name"])}, {E_(outs[0]["label"] or outs[0]["cat"])})'
+            parts.append(f'{E_(q["name"] or "?")}{note}')
+        qb = f'<div class="kv"><span>Starting QBs</span><b>{" &middot; ".join(parts)}</b></div>'
+        adj = [(t, og["qb"][t].get("adj", 0)) for t in (g.away_team, g.home_team)]
+        if any(abs(a) >= 0.5 for _, a in adj):
+            qb += ('<div class="kv"><span>QB adjustment (pts vs the QB play the rating is built on)</span><b>'
+                   + " &middot; ".join(f"{t} {a:+.1f}" for t, a in adj) + '</b></div>')
+    elif isinstance(g.get("away_qb_name"), str):
         qb = f'<div class="kv"><span>Starting QBs (feed)</span><b>{E_(g.away_qb_name)} &middot; {E_(str(g.home_qb_name))}</b></div>'
     box1 = (f'<div class="box"><div class="sub">Projected score ({g.away_team} @ {g.home_team})</div>'
             f'<div class="big">{og["ap"]:.1f} - {og["hp"]:.1f}</div>'
@@ -1194,10 +1675,11 @@ def render_game(og, rec, r, graded, week):
                 'Between <b>Bet at</b> and <b>Fair</b> is a lean. Anything worse than <b>Fair</b>, skip. The box is pre-filled '
                 'with the closing price from nflverse; type your sportsbook\'s price to see the edge.</div></div>')
     when = kickoff(g)
+    inj_html = render_injuries(og)
     return (f'<details class="card game"><summary><div class="gh"><div class="time">{when.replace(" ", "<br>", 1)}</div>'
             f'<div>{"".join(teams)}</div><div class="proj"><div class="sc">{og["ap"]:.1f} - {og["hp"]:.1f}</div>'
             f'<div class="wp">total {og["tot"]:.1f}</div></div></div></summary><div class="gb"><div class="grid2">{box1}{box2}</div>'
-            f'{render_board(og, graded)}{render_props(og, graded, week)}</div></details>')
+            f'{inj_html}{render_board(og, graded)}{render_props(og, graded, week)}</div></details>')
 
 
 def render_week(wk, games, title, sub):
@@ -1419,9 +1901,15 @@ news (injuries, a QB change, weather). Qualifying bets alternate between high-pr
 <p><b>Track record.</b> Each run rebuilds every earlier week of the season walk-forward and grades it, plus three full
 past seasons under the same rules, and logs every prediction to <code>nfl_data/predictions_log.csv</code>. Check the
 calibration and the long-run table before trusting a market.</p>
-<p><b>Limits.</b> The model doesn't know about injuries, suspensions, weather or rest. It also only sees closing
-lines, which are the hardest to beat; the backtest is a conservative test. Check injury reports and the starting QB before
-betting, and shop for the best price.</p>
+<p><b>Injuries and rosters.</b> For games not yet played, each run reads current teams, injury designations and
+depth charts from Sleeper and ESPN's injury report. Players who are out, on IR, doubtful or now on another team are
+dropped from the projections, and their targets and carries go to the teammates who are left. The starting QB is the
+healthy QB atop the depth chart. When he isn't the QB the team's rating was built on, the projected score moves by about
+3.5 points per net yard per dropback between the two (fit on 2024-2026 games, where the full effect was about 4.7).
+Other injuries change player projections but not the team rating.</p>
+<p><b>Limits.</b> The model doesn't know about weather or rest, and past weeks in the track record are rebuilt without
+injury data (it isn't known for past dates). It only sees closing lines, which are the hardest to beat. Re-run close to
+kickoff for late scratches, and shop for the best price.</p>
 <p class="sub">Settings live at the top of nfl_edge.py under CONFIG.</p>"""
 
 
@@ -1569,18 +2057,23 @@ def main():
     tg = add_xpts(tg, fit_xpts(tg[tg.season < SEASON]))
     md = MarginDist(games, SEASON)
     print(f"  target: {SEASON} week {target}")
+    status = load_status()
+    if status is None and USE_LIVE_STATUS:
+        print("  [warn] couldn't load injuries/rosters (Sleeper and ESPN both failed); props use last-two-weeks players")
+    qbb = QBBook(st)
 
     print("=== Walk-forward weeks ===")
     weeks = []
     for w in range(FIRST_GRADED_WEEK, target + 1):
-        wk = grade_week(build_week(SEASON, w, games, tg, st, md), st)
+        live = (status, qbb) if w == target else (None, None)
+        wk = grade_week(build_week(SEASON, w, games, tg, st, md, status=live[0], qbb=live[1]), st)
         weeks.append(wk)
         print(f"  week {w}: {len(wk['games'])} games, {len(wk['picks'])} top bets, {len(wk['props'])} players")
     tgt = weeks[-1]
     nxt = None
     ng = games[(games.season == SEASON) & (games.week == target + 1)]
     if len(ng) and ng.spread_line.notna().any() and not ng.done.any():
-        nxt = grade_week(build_week(SEASON, target + 1, games, tg, st, md), st)
+        nxt = grade_week(build_week(SEASON, target + 1, games, tg, st, md, status=status, qbb=qbb), st)
         print(f"  week {target + 1} (next): {len(nxt['games'])} games, {len(nxt['picks'])} top bets")
 
     long_run = {}
@@ -1599,7 +2092,10 @@ def main():
     if nxt:
         top_list.append((nxt, f"Week {nxt['week']} &middot; upcoming"))
     top_list.append((tgt, f"Week {target} &middot; " + (f"graded ({done} of {len(tgt['games'])} played)" if done else "upcoming")))
-    tabs = [("top", "Top bets", render_top(top_list, long_run_note(long_run)))]
+    warn = "" if status is not None or not USE_LIVE_STATUS else (
+        '<div class="warnbox"><b>No injury data this run.</b> Sleeper and ESPN couldn\'t be reached, so projections use '
+        'everyone who played in the last two weeks and the schedule feed\'s QBs. Check injuries before betting, or run again.</div>')
+    tabs = [("top", "Top bets", render_top(top_list, warn + long_run_note(long_run)))]
     sub = (f"Built with every game and stat before week {target}; finished games show the result. "
            f"{pending} game(s) still to play." if done else "Built with every game and stat so far.")
     tabs.append(("wk", f"Week {target}", render_week(tgt, games, f"Week {target}", sub)))
@@ -1614,7 +2110,9 @@ def main():
     tabs.append(("hw", "How it works", '<div class="prose">' + how_text(md) + '</div>'))
 
     n_games = int(((tg.ord < SEASON * 25 + target) & (tg.season >= SEASON - SEASONS_BACK)).sum() / 2)
-    page = render_page(tabs, datetime.now().strftime("%a %b %-d, %-I:%M %p"), n_games)
+    now = datetime.now()
+    page = render_page(tabs, now.strftime("%a %b ") + f"{now.day}, {now.hour % 12 or 12}:{now.minute:02d} " + now.strftime("%p"),
+                       n_games)
     with open(OUTPUT_HTML, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"  [saved] {OUTPUT_HTML} ({len(page) / 1e6:.1f} MB)")
