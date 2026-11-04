@@ -24,20 +24,28 @@ and adjusts the projected score for QB changes.
 Each week: run pull_2026_stats.py first (fresh stats), then this script.
 """
 
-import base64
-import hashlib
 import html
 import io
 import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime
+
+import sys
 
 import numpy as np
 import pandas as pd
 import requests
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import edge_common as ec
+except ImportError:  # pragma: no cover
+    raise SystemExit("edge_common.py is missing. Put it in the same folder as nfl_edge.py.")
 
 # ------------------------------------------------------------------
 # CONFIG
@@ -92,11 +100,9 @@ MAX_BETS_PER_GAME = 2
 STAKE = 1.0               # units per graded bet
 LONG_RUN_SEASONS = [2023, 2024, 2025]   # full past seasons re-run under the same rules (Track record)
 
-# --- GitHub auto-upload (same token setup as pull_2026_stats.py) ---
-PUSH_TO_GITHUB = False
-GITHUB_REPO = "HalfWitty/FootballFriend"
+# --- publish to GitHub (uses git and your saved GitHub sign-in, same as the NHL board; no token needed) ---
+PUSH_TO_GITHUB = True
 GITHUB_BRANCH = "main"
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 # ------------------------------------------------------------------
 
 SLEEPER_TO_NFLVERSE = {"LAR": "LA", "JAC": "JAX", "WSH": "WAS", "OAK": "LV", "SD": "LAC", "STL": "LA"}
@@ -1030,6 +1036,132 @@ def fmt_stat(stat, v):
 
 
 # ==================================================================
+# GRADES, TREND PICKS AND UNITS (shared edge_common.py)
+# ==================================================================
+RES = {1.0: "W", 0.0: "L", 0.5: "P"}
+
+
+def nfl_side(mk, g):
+    if mk["market"] in ("Moneyline", "Spread"):
+        return "H" if mk["side"] == g.home_team else ("A" if mk["side"] == g.away_team else None)
+    if mk["market"] == "Team total" and str(mk["side"]).endswith("-o"):
+        return "H" if mk["side"][:-2] == g.home_team else "A"
+    return None
+
+
+def trend_games(games, last_season, first_season=2012):
+    d = games[(games.season >= first_season) & (games.season <= last_season) & (games.game_type == "REG")]
+    out = []
+    for r in d.itertuples():
+        done = bool(r.done)
+        out.append(dict(gid=r.game_id, date=str(r.gameday)[:10], season=int(r.season), home=r.home_team,
+                        away=r.away_team, done=done, hs=float(r.home_score) if done else None,
+                        ot=bool(getattr(r, "overtime", 0) == 1),
+                        spread=None if pd.isna(r.spread_line) else -float(r.spread_line),
+                        **{"as": float(r.away_score) if done else None}))
+    return out
+
+
+def trust_rows_weeks(weeks):
+    rows = []
+    for wk in weeks:
+        for og in wk["games"]:
+            for mk in og["markets"]:
+                if mk.get("out") in (0.0, 1.0) and mk.get("mkt") is not None and ec.clean_am(mk["price"]) is not None:
+                    rows.append({"cat": mk["market"], "p": mk["p"], "q": mk["mkt"], "y": int(mk["out"])})
+    return rows
+
+
+def ec_week(wk, tb, trust):
+    """Grade and size every market in a week, sort its top bets best grade first, add trend picks."""
+    depth = min(1.0, (wk["week"] - 1) / 4)
+    for og in wk["games"]:
+        g = og["g"]
+        for mk in og["markets"]:
+            side = nfl_side(mk, g)
+            sup = tb.support(g.game_id, side) if side else 0.0
+            price = ec.clean_am(mk["price"])
+            d = dict(p=mk["p"], lo=mk["lo"], book=price, mkt=mk["mkt"], ev=mk["ev"] if price is not None else None,
+                     cat=mk["market"])
+            ec.decorate(d, trust, sup, depth, side_bet=side is not None)
+            d["support"] = sup if side else None
+            mk["ec"] = d
+    wk["picks"].sort(key=lambda x: -x[1]["ec"]["score"])
+    ogs = {og["g"].game_id: og for og in wk["games"]}
+    trends = []
+    for tg, side, sinfo in ec.trend_candidates(tb, [dict(gid=k) for k in ogs]):
+        if len(trends) >= ec.SETTINGS["trend_max_per_day"]:
+            break
+        og = ogs[tg["gid"]]
+        g = og["g"]
+        team = g.home_team if side == "H" else g.away_team
+        exprs = []
+        for mk in og["markets"]:
+            if nfl_side(mk, g) == side:
+                price = ec.clean_am(mk["price"])
+                exprs.append(dict(label=mk["label"], cat=mk["market"], p=mk["p"], lo=mk["lo"], book=price, mkt=mk["mkt"],
+                                  ev=mk["ev"] if price is not None else None, mk=mk))
+        if not exprs:
+            continue
+        play, others = ec.best_expression(exprs)
+        ml = next((m for m in og["markets"] if m["market"] == "Moneyline" and m["side"] == team), None)
+        agree, note = None, ""
+        if ml is not None and ml.get("mkt") is not None:
+            agree = ml["p"] > ml["mkt"]
+            note = (f"Model: {team} {ml['p'] * 100:.0f}% to win vs the market's {ml['mkt'] * 100:.0f}% "
+                    f"({'the model likes the price' if agree else 'the model thinks the price is too high'}).")
+        it = dict(tier="trend", og=og, team=team, side=sinfo, stats=tb.stats, play=play, others=others, agree=agree,
+                  model_note=note, game=f"{g.away_team} @ {g.home_team}", time=kickoff(g), label=play["label"],
+                  cat=play["cat"], p=play["p"], lo=play["lo"], book=play["book"], mkt=play["mkt"], ev=play["ev"],
+                  result=RES.get(play["mk"].get("out")))
+        ec.decorate(it, trust, sinfo["support"], depth, side_bet=True)
+        trends.append(it)
+    wk["trends"] = trends
+    return wk
+
+
+def ec_rows(weeks):
+    """Top bets and trend picks of graded/upcoming weeks, in the shared history format."""
+    rows = []
+    for wk in weeks:
+        for og, mk in wk.get("picks", []):
+            g, e = og["g"], mk["ec"]
+            rows.append(dict(id=f"{g.game_id}|{mk['tag']}|{mk['label']}", date=str(g.gameday)[:10], game_id=g.game_id,
+                             game=f"{g.away_team} @ {g.home_team}", label=mk["label"], cat=mk["market"], tier=mk["tag"],
+                             p=mk["p"], mkt=mk["mkt"], book=e["book"], ev=mk["ev"], grade=e["grade"], units=e["units"],
+                             result=RES.get(mk.get("out"))))
+        for it in wk.get("trends", []):
+            og = it["og"]
+            g = og["g"]
+            rows.append(dict(id=f"{g.game_id}|trend|{it['label']}", date=str(g.gameday)[:10], game_id=g.game_id,
+                             game=it["game"], label=it["label"], cat=it["cat"], tier="trend", p=it["p"], mkt=it["mkt"],
+                             book=it["book"], ev=it["ev"], grade=it["grade"], units=it["units"], result=it.get("result")))
+    return rows
+
+
+def ec_track_nfl(x):
+    if not x:
+        return ""
+    out = ['<h2>Where picks land</h2><p class="sub" style="max-width:860px">Every priced top bet and trend pick this season '
+           'by its edge at the price (across) and the price (up). Green won, red lost, blue rings are this week\'s picks. '
+           'Shaded zones show where at least 5 graded picks made (green) or lost (red) money for the filters you pick. '
+           'Hover or tap a dot for the details. Prices are closing lines.</p>',
+           ec.scatter_html(x["points"], x["today"], sport="NFL", window="all"),
+           f'<h2>Picks by type and grade ({SEASON})</h2><p class="sub" style="max-width:860px">This season\'s top bets and '
+           'trend picks, walk-forward. "1u each" is flat betting at the closing price; "Suggested units" stakes what the '
+           'board suggested.</p>', ec.perf_html(x["cur"])]
+    if x.get("long"):
+        out += [f'<h2>Picks by type and grade, {x["long_span"]}</h2><p class="sub" style="max-width:860px">The same picks, '
+                'grades and units re-run week by week over three full seasons. This is the bigger sample: use it to see '
+                'which kinds of pick and which grades have held up against closing lines.</p>', ec.perf_html(x["long"])]
+    out += ['<h2>Trust by bet type</h2><p class="sub" style="max-width:860px">How much of the model\'s claimed edge over '
+            'the closing line has shown up in results (all game markets where the model saw an edge, long-run seasons '
+            'plus this season before this week). Units and grades use it, so a bet type that has only matched the '
+            'market gets small or zero units.</p>', ec.trust_html(x["trust"])]
+    return "".join(out)
+
+
+# ==================================================================
 # GRADING
 # ==================================================================
 def grade_market(mk, g):
@@ -1438,6 +1570,7 @@ def render_pick(i, og, mk):
             f'<div class="head"><span class="what">{E_(mk["label"])}</span><span class="price">{fmt_am(mk["price"])}</span>{tag}</div>'
             f'<div class="meta">{g.away_team} at {g.home_team}, {kickoff(g)}. {mk["market"]}, '
             f'{"closing line" if g.done else "latest line"}{final}</div>'
+            f'<div style="margin:4px 0">{ec.badges_html(mk["ec"], mk["ec"]["support"]) if mk.get("ec") else ""}</div>'
             f'{price_bar(mk["fair"], mk["bet_at"], mk["price"])}'
             f'<div class="facts"><span>Win chance <b>{pct(mk["p"])}</b></span><span>Market <b>{pct(mk["mkt"])}</b></span>'
             f'<span>Expected return <b>{ev}</b></span><span>Bet down to <b>{fmt_am(mk["bet_at"])}</b></span></div>'
@@ -1483,10 +1616,12 @@ def render_top(wk_list, note=""):
     out = [note, '<h2>Top bets</h2><p class="sub" style="max-width:820px">Picks come from the moneyline, spread and total, '
            'alternating two kinds: <span class="tag hp">High probability</span> bets the model gives '
            f'{HIGH_PROB:.0%}+ where the price beats fair odds, and <span class="tag va">Value</span> bets where the price '
-           'beats the cautious <b>Bet at</b> price. At most 2 bets per game, never two on the same side or total, and '
+           'beats the cautious <b>Bet at</b> price. Each pick has a grade (tap it for the reasons) and suggested units, '
+           'and each week is sorted best grade first. At most 2 bets per game, never two on the same side or total, and '
            f'never when the model is more than {MAX_MARKET_GAP:.0%} away from the market. Prices are the closing lines '
            'from nflverse; type your own book\'s price to re-check. On each price bar, green is a good price, amber a thin '
            'one and red a pass; the black mark is the book\'s price.</p>']
+    first_trend = True
     for wk, title in wk_list:
         picks = wk["picks"]
         out.append(f'<h2>{title}</h2>')
@@ -1501,6 +1636,12 @@ def render_top(wk_list, note=""):
                            f'<b class="{"good" if u >= 0 else "bad"}">{u:+.2f} units</b> at closing prices'
                            f'{" &middot; " + str(len(picks) - len(graded)) + " still to play" if len(graded) < len(picks) else ""}</p>')
             out.append('<div class="card">' + "".join(render_pick(i + 1, og, mk) for i, (og, mk) in enumerate(picks)) + '</div>')
+        if "trends" in wk:
+            out.append('<h3>Trend picks</h3>')
+            if first_trend:
+                out.append(ec.trend_intro_html("NFL"))
+                first_trend = False
+            out.append(ec.trend_picks_html("NFL", wk["trends"]))
         if wk.get("checks"):
             out.append('<h3>Price check</h3><p class="sub" style="max-width:820px">No sportsbook price in the feed '
                        '(team totals, player props). Lines shown are the market-implied team total or the player\'s '
@@ -1761,6 +1902,11 @@ def skill(b, mb):
     return f'<span class="{"good" if v > 0 else "bad"}">{v:+.1%}</span>'
 
 
+def fx(v, d=3):
+    """Format a number that may be missing (a week with no finished games)."""
+    return "-" if v is None else f"{v:.{d}f}"
+
+
 def summary_row(label, s):
     roi = s["units"] / s["risked"] if s["risked"] else 0
     return (f'<tr><td class="l">{label}</td><td>{s["n"]}</td><td>{wlp(s["bets"])}</td>'
@@ -1768,8 +1914,8 @@ def summary_row(label, s):
             f'<td>{wlp(s["ats"])} <span class="sub">{hit_pct(s["ats"])}</span></td>'
             f'<td>{wlp(s["ou"])} <span class="sub">{hit_pct(s["ou"])}</span></td>'
             f'<td>{wlp(s["su"])} <span class="sub">{hit_pct(s["su"])}</span></td>'
-            f'<td>{s["ml_brier"]:.3f} / {s["mkt_brier"]:.3f}</td>'
-            f'<td>{s["mar_mae"]:.1f} / {s["spr_mae"]:.1f}</td><td>{s["tot_mae"]:.1f} / {s["mtot_mae"]:.1f}</td></tr>')
+            f'<td>{fx(s["ml_brier"])} / {fx(s["mkt_brier"])}</td>'
+            f'<td>{fx(s["mar_mae"], 1)} / {fx(s["spr_mae"], 1)}</td><td>{fx(s["tot_mae"], 1)} / {fx(s["mtot_mae"], 1)}</td></tr>')
 
 
 SUMMARY_HEAD = ('<thead><tr><th>Span</th><th>Games</th><th>Top bets</th><th>Units</th><th>ROI</th><th>Every game ATS</th>'
@@ -1790,7 +1936,7 @@ def calib_table(pairs):
             '<th>Actually happened</th></tr></thead><tbody>' + "".join(rows) + '</tbody></table></div></div>')
 
 
-def render_track(target, weeks, long_run):
+def render_track(target, weeks, long_run, ecx=None):
     s_t = summarize_games([target])
     s_all = summarize_games(weeks)
     roi = s_t["units"] / s_t["risked"] if s_t["risked"] else 0
@@ -1807,7 +1953,7 @@ def render_track(target, weeks, long_run):
                f'<div>Every game ATS<b>{wlp(s_t["ats"])}</b></div>'
                f'<div>Every game O/U<b>{wlp(s_t["ou"])}</b></div>'
                f'<div>Straight up<b>{wlp(s_t["su"])}</b></div>'
-               f'<div>ML Brier (model / market)<b>{s_t["ml_brier"]:.3f} / {s_t["mkt_brier"]:.3f}</b></div>'
+               f'<div>ML Brier (model / market)<b>{fx(s_t["ml_brier"])} / {fx(s_t["mkt_brier"])}</b></div>'
                f'<div>Games graded<b>{s_t["n"]}{f" &middot; {pend} pending" if pend else ""}</b></div></div></div>')
     bet_rows = []
     for og, mk in target["picks"]:
@@ -1821,6 +1967,7 @@ def render_track(target, weeks, long_run):
         out.append('<div class="card"><div class="tw"><table><thead><tr><th>Game</th><th>Bet</th><th>Type</th><th>Model</th>'
                    '<th>Market</th><th>Close</th><th>Result</th><th>Units</th></tr></thead><tbody>' + "".join(bet_rows) +
                    '</tbody></table></div></div>')
+    out.append(ec_track_nfl(ecx))
     rows = [summary_row(f'Week {w["week"]}', summarize_games([w])) for w in weeks]
     rows.append(summary_row(f'<b>{target["season"]} weeks {weeks[0]["week"]}-{weeks[-1]["week"]}</b>', s_all))
     out.append(f'<h2>By week ({target["season"]})</h2><p class="sub" style="max-width:860px">"Every game" columns take the '
@@ -1910,7 +2057,8 @@ Other injuries change player projections but not the team rating.</p>
 <p><b>Limits.</b> The model doesn't know about weather or rest, and past weeks in the track record are rebuilt without
 injury data (it isn't known for past dates). It only sees closing lines, which are the hardest to beat. Re-run close to
 kickoff for late scratches, and shop for the best price.</p>
-<p class="sub">Settings live at the top of nfl_edge.py under CONFIG.</p>"""
+<p class="sub">Settings live at the top of nfl_edge.py under CONFIG; grade, trend and unit settings live in
+edge_common.py under SETTINGS.</p>"""
 
 
 def how_text(md):
@@ -1922,7 +2070,7 @@ def how_text(md):
     t = HOW
     for k in sorted(rep, key=len, reverse=True):
         t = t.replace(k, rep[k])
-    return t
+    return t + ec.method_html()
 
 
 JS = r"""
@@ -1971,15 +2119,15 @@ def render_page(tabs, generated, games_in_model):
                    for i, (tid, _, body) in enumerate(tabs))
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">\n'
             f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>NFL Edge Board</title>\n'
-            f'<style>{CSS}</style></head><body>\n'
+            f'<style>{CSS}{ec.CSS}</style></head><body>\n'
             f'<header><h1>NFL Edge Board</h1><div class="sub">Generated {generated} &middot; {SEASON} season &middot; '
             f'{games_in_model} games in model &middot; tap a game to open the full breakdown &middot; '
             f'<a class="backlink" href="{SITE_LINK}">The Stat Sheet &rarr;</a></div></header>\n'
-            f'<nav><div class="in">{nav}</div></nav><main>{secs}</main>\n<script>{JS.replace("CALK", str(PROP_CALIB_K))}</script></body></html>')
+            f'<nav><div class="in">{nav}</div></nav><main>{secs}</main>\n<script>{JS.replace("CALK", str(PROP_CALIB_K))}{ec.JS}</script></body></html>')
 
 
 # ==================================================================
-# LOG + GITHUB
+# LOG + GITHUB (git push)
 # ==================================================================
 def write_log(weeks, path):
     rows = []
@@ -1991,50 +2139,43 @@ def write_log(weeks, path):
                              "bet": mk["label"], "model_p": round(mk["p"], 4), "market_p": None if mk["mkt"] is None else round(mk["mkt"], 4),
                              "price": mk["price"], "fair": mk["fair"], "bet_at": mk["bet_at"],
                              "top_bet": mk.get("tag", "") if any(mk is m for _, m in wk.get("picks", [])) else "",
-                             "outcome": mk.get("out"), "units": mk.get("pl") if any(mk is m for _, m in wk.get("picks", [])) else None})
+                             "outcome": mk.get("out"), "units": mk.get("pl") if any(mk is m for _, m in wk.get("picks", [])) else None,
+                             "grade": (mk.get("ec") or {}).get("grade"), "suggested_units": (mk.get("ec") or {}).get("units")})
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
     print(f"  [saved] {path} ({len(rows)} rows)")
 
 
-def gh(method, path, **kwargs):
-    r = requests.request(method, f"https://api.github.com/repos/{GITHUB_REPO}{path}",
-                         headers={"Authorization": f"Bearer {GITHUB_TOKEN}", "Accept": "application/vnd.github+json",
-                                  "X-GitHub-Api-Version": "2022-11-28"}, timeout=120, **kwargs)
-    if r.status_code >= 300:
-        raise RuntimeError(f"GitHub {method} {path} -> {r.status_code}: {r.text[:300]}")
-    return r.json()
+def _git(*args, check=True, quiet=False):
+    r = subprocess.run(["git", *args], stdout=subprocess.PIPE if quiet else None,
+                       stderr=subprocess.PIPE if quiet else None, text=True)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed" + (f": {(r.stderr or '').strip()}" if quiet else ""))
+    return r
 
 
 def push_to_github(files):
-    print(f"\n=== Pushing to GitHub ({GITHUB_REPO}@{GITHUB_BRANCH}) ===")
-    if not GITHUB_TOKEN:
-        print("  [skip] GITHUB_TOKEN isn't set")
-        return
+    """Commit and push the board with git, using your saved GitHub sign-in (same as the NHL board)."""
+    print(f"\n=== Publishing to GitHub ({GITHUB_BRANCH}) ===")
     try:
-        head = gh("GET", f"/git/ref/heads/{GITHUB_BRANCH}")["object"]["sha"]
-        base_tree = gh("GET", f"/git/commits/{head}")["tree"]["sha"]
-        existing = {t["path"]: t["sha"] for t in gh("GET", f"/git/trees/{base_tree}?recursive=1").get("tree", [])}
-        tree = []
-        for local in files:
-            repo_path = local.replace(os.sep, "/").lstrip("./")
-            data = open(local, "rb").read()
-            if existing.get(repo_path) == hashlib.sha1(b"blob %d\0" % len(data) + data).hexdigest():
-                print(f"  [same] {repo_path}")
-                continue
-            blob = gh("POST", "/git/blobs", json={"content": base64.b64encode(data).decode(), "encoding": "base64"})
-            tree.append({"path": repo_path, "mode": "100644", "type": "blob", "sha": blob["sha"]})
-            print(f"  [upload] {repo_path}")
-        if not tree:
-            print("  Already up to date.")
+        if shutil.which("git") is None:
+            raise RuntimeError("git isn't installed (https://git-scm.com)")
+        if _git("rev-parse", "--is-inside-work-tree", check=False, quiet=True).returncode != 0:
+            raise RuntimeError("run this script from inside your FootballFriend repo folder")
+        _git("add", "--", *files)
+        if _git("diff", "--cached", "--quiet", check=False).returncode == 0:
+            print("  Nothing changed since the last publish.")
             return
-        new_tree = gh("POST", "/git/trees", json={"base_tree": base_tree, "tree": tree})["sha"]
         msg = f"Update NFL Edge Board ({time.strftime('%Y-%m-%d')})"
-        commit = gh("POST", "/git/commits", json={"message": msg, "tree": new_tree, "parents": [head]})["sha"]
-        gh("PATCH", f"/git/refs/heads/{GITHUB_BRANCH}", json={"sha": commit})
-        print(f"  [done] {commit[:7]} \"{msg}\"")
+        _git("commit", "-q", "-m", msg, "--", *files)
+        # pick up anything pushed from elsewhere (e.g. pull_2026_stats.py) before pushing
+        _git("pull", "-q", "--rebase", "--autostash", "origin", GITHUB_BRANCH)
+        if _git("push", "origin", GITHUB_BRANCH, check=False).returncode != 0:
+            raise RuntimeError("push failed. Make sure you're signed in to GitHub on this computer "
+                               "(Git Credential Manager, `gh auth login`, or an SSH key)")
+        print(f'  [done] "{msg}"')
     except RuntimeError as e:
-        print(f"  [error] {e}")
+        print(f"  [skip] Publish skipped: {e}")
 
 
 # ==================================================================
@@ -2086,6 +2227,33 @@ def main():
             sm = summarize_games(long_run[s])
             print(f"  {s}: top bets {wlp(sm['bets'])}, {sm['units']:+.1f}u")
 
+    print("=== Grades, trend picks and units ===")
+    tg_all = trend_games(games, SEASON)
+    long_rows, base_rows = [], []
+    if long_run:
+        for s_ in sorted(long_run):
+            tb_s = ec.TrendBook("NFL", [x for x in tg_all if x["season"] <= s_], stats_before=f"{s_}-08-01")
+            tr_s = ec.Trust(base_rows)
+            for w_ in long_run[s_]:
+                ec_week(w_, tb_s, tr_s)
+            long_rows += ec_rows(long_run[s_])
+            base_rows += trust_rows_weeks(long_run[s_])
+    tb = ec.TrendBook("NFL", tg_all, stats_before=f"{SEASON}-08-01")
+    for wk in weeks:
+        prior = [w_ for w_ in weeks if w_["week"] < wk["week"]]
+        ec_week(wk, tb, ec.Trust(base_rows + trust_rows_weeks(prior)))
+    trust_now = ec.Trust(base_rows + trust_rows_weeks([w_ for w_ in weeks if w_["week"] < (nxt or tgt)["week"]]))
+    if nxt:
+        ec_week(nxt, tb, trust_now)
+    cur_rows = ec_rows(weeks + ([nxt] if nxt else []))
+    graded = [r for r in cur_rows if r.get("result")]
+    upcoming = [r for r in cur_rows if not r.get("result")]
+    ecx = {"points": ec.scatter_points(graded, upcoming), "cur": graded, "long": [r for r in long_rows if r.get("result")],
+           "long_span": f"{min(long_run)}-{max(long_run)}" if long_run else "", "trust": trust_now,
+           "today": datetime.now().strftime("%Y-%m-%d")}
+    print(f"  trust in the model's edge: {trust_now.overall * 100:.0f}% from {trust_now.n} graded bets; "
+          f"{sum(len(w_.get('trends', [])) for w_ in weeks)} trend picks this season")
+
     pending = sum(1 for og in tgt["games"] if not og["g"].done)
     done = len(tgt["games"]) - pending
     top_list = []
@@ -2106,7 +2274,7 @@ def main():
             (" (unfinished week-" + str(target) + " games aren't in yet - rerun after they finish)." if pending else "."))))
     latest = nxt or tgt
     tabs.append(("lg", "League", render_league(games, tg, latest["ratings"], SEASON, latest["week"])))
-    tabs.append(("tr", "Track record", render_track(tgt, weeks, long_run)))
+    tabs.append(("tr", "Track record", render_track(tgt, weeks, long_run, ecx)))
     tabs.append(("hw", "How it works", '<div class="prose">' + how_text(md) + '</div>'))
 
     n_games = int(((tg.ord < SEASON * 25 + target) & (tg.season >= SEASON - SEASONS_BACK)).sum() / 2)
