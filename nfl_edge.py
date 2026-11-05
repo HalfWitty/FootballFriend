@@ -2161,7 +2161,7 @@ def push_to_github(files):
         if shutil.which("git") is None:
             raise RuntimeError("git isn't installed (https://git-scm.com)")
         if _git("rev-parse", "--is-inside-work-tree", check=False, quiet=True).returncode != 0:
-            raise RuntimeError("run this script from inside your FootballFriend repo folder")
+            raise RuntimeError(f"{os.getcwd()} isn't a git copy of FootballFriend. Keep nfl_edge.py in your FootballFriend repo folder")
         _git("add", "--", *files)
         if _git("diff", "--cached", "--quiet", check=False).returncode == 0:
             print("  Nothing changed since the last publish.")
@@ -2189,6 +2189,8 @@ def pick_target_week(games):
 
 def main():
     t0 = time.time()
+    # work from the script's own folder (your FootballFriend repo), wherever it was launched from
+    os.chdir(os.path.dirname(os.path.abspath(__file__)))
     print("=== Loading data ===")
     games = load_games()
     target = TARGET_WEEK or pick_target_week(games)
