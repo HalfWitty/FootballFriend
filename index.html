@@ -3,75 +3,64 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-:root{--bg:#E9EEEB;--surface:#FFFFFF;--sunk:#F3F6F4;--ink:#13201A;--muted:#55635C;--line:#CFD8D3;
---felt:#1D5A3E;--felt-soft:#DCEAE2;--brass:#9A6B12;--brass-soft:#F6EBD3;--win:#1A7A4F;--loss:#A8372E;--focus:#1D5A3E;
+:root{--bg:#FFFFFF;--ink:#101814;--muted:#4C5852;--line:#D8DFDB;--sunk:#F4F7F5;
+--felt:#1D5A3E;--felt-soft:#E1EEE7;--brass:#8A5D0B;--brass-soft:#F8EED9;--win:#14703F;--loss:#A5302A;--warn-soft:#FBE6E3;
 color-scheme:light}
-@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0E1512;--surface:#16201B;--sunk:#121A16;--ink:#E6EEE9;
---muted:#9AABA2;--line:#26342D;--felt:#74C59B;--felt-soft:#1C3A2B;--brass:#E2B65C;--brass-soft:#3A2F17;--win:#5FCB93;--loss:#EF7C70;
---focus:#74C59B;color-scheme:dark}}
-:root[data-theme="dark"]{--bg:#0E1512;--surface:#16201B;--sunk:#121A16;--ink:#E6EEE9;--muted:#9AABA2;--line:#26342D;
---felt:#74C59B;--felt-soft:#1C3A2B;--brass:#E2B65C;--brass-soft:#3A2F17;--win:#5FCB93;--loss:#EF7C70;--focus:#74C59B;color-scheme:dark}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 "Barlow",system-ui,-apple-system,"Segoe UI",sans-serif}
-.cond{font-family:"Barlow Condensed","Arial Narrow",system-ui,sans-serif;font-variant-numeric:tabular-nums}
 a{color:var(--felt)}
-:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+:focus-visible{outline:2px solid var(--felt);outline-offset:2px}
 .wrap{max-width:1120px;margin:0 auto;padding:0 16px}
-header{padding:34px 0 18px}
-.mark{display:flex;flex-wrap:wrap;align-items:flex-end;gap:6px 20px}
+header{padding:34px 0 10px;border-bottom:1px solid var(--line)}
 .mark h1{margin:0;font:700 clamp(44px,8vw,76px)/.9 "Barlow Condensed",system-ui,sans-serif;letter-spacing:-.5px}
-.mark p{margin:0 0 6px;color:var(--muted);max-width:46ch}
-.theme{margin-left:auto;align-self:flex-start;background:none;border:1px solid var(--line);border-radius:4px;color:var(--muted);font:inherit;font-size:13px;padding:4px 9px;cursor:pointer}
+.mark p{margin:10px 0 18px;color:var(--muted);max-width:60ch}
 .boards{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:10px;margin:22px 0 8px}
-.board{display:block;text-decoration:none;color:var(--ink);background:var(--surface);border:1px solid var(--line);border-radius:8px;
+.board{display:block;text-decoration:none;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;
 padding:14px 16px 12px;border-top:5px solid var(--felt)}
 .board:hover{border-color:var(--felt)}
 .board b{display:block;font:700 28px/1 "Barlow Condensed",system-ui,sans-serif}
 .board span{display:block;font-size:13.5px;color:var(--muted);margin-top:6px}
 .board .warn{color:var(--loss)}
 .board.extra{border-top-color:var(--brass)}
-h2{font:700 40px/1 "Barlow Condensed",system-ui,sans-serif;margin:38px 0 6px}
-h3{font:700 26px/1.1 "Barlow Condensed",system-ui,sans-serif;margin:30px 0 4px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+h2{font:700 42px/1 "Barlow Condensed",system-ui,sans-serif;margin:40px 0 6px}
+h3{font:700 28px/1.1 "Barlow Condensed",system-ui,sans-serif;margin:30px 0 2px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 h3 a{font:500 15px/1 "Barlow",system-ui,sans-serif}
 .lede{color:var(--muted);max-width:74ch;margin:0 0 6px}
 .rules{margin:10px 0 0;padding-left:20px;max-width:76ch;color:var(--muted);font-size:15px}
 .rules li{margin:3px 0}
 .crecord{display:flex;flex-wrap:wrap;gap:6px 26px;margin:14px 0 0;font-size:14.5px;color:var(--muted)}
 .crecord b{color:var(--ink);font:700 22px/1 "Barlow Condensed",system-ui,sans-serif;margin-right:4px}
-.group{margin:14px 0 0}
-.ghead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;padding:0 2px 6px}
-.ghead b{font:600 19px/1.2 "Barlow Condensed",system-ui,sans-serif}
+.group{margin:16px 0 0}
+.ghead{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 16px;padding:0 2px 6px}
+.ghead b{font:600 20px/1.2 "Barlow Condensed",system-ui,sans-serif}
 .ghead span{font-size:14px;color:var(--muted)}
 .ghead .rec{color:var(--ink);font-weight:600}
-.slip{background:var(--surface);border:1px solid var(--line);border-left:6px solid var(--brass);border-radius:6px;
+.slip{background:var(--bg);border:1px solid var(--line);border-left:6px solid var(--brass);border-radius:6px;
 display:grid;grid-template-columns:1fr auto;gap:2px 18px;padding:13px 16px;margin:0 0 8px}
 .slip .bet{font:700 26px/1.05 "Barlow Condensed",system-ui,sans-serif}
 .slip .odds{font:700 26px/1.05 "Barlow Condensed",system-ui,sans-serif;text-align:right;color:var(--brass)}
+.slip .odds small{display:block;font:500 13px/1.3 "Barlow",system-ui,sans-serif;color:var(--muted)}
 .slip .game{color:var(--muted);font-size:14.5px}
 .slip .units{text-align:right;font-size:14.5px;color:var(--muted)}
-.slip .facts{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:14px;color:var(--muted);margin-top:6px}
+.slip .facts{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:14px;color:var(--muted);margin-top:6px;align-items:center}
 .slip .facts b{color:var(--ink);font-weight:600}
-.chip{display:inline-block;font-size:12.5px;font-weight:600;padding:1px 8px;border-radius:10px;background:var(--felt-soft);color:var(--felt);margin-right:4px}
+.slip .note{grid-column:1/-1;font-size:13.5px;color:var(--muted)}
+.chip{display:inline-block;font-size:12.5px;font-weight:600;padding:1px 8px;border-radius:10px;background:var(--felt-soft);color:var(--felt)}
 .chip.g{background:var(--brass-soft);color:var(--brass)}
+.chip.w{background:var(--warn-soft);color:var(--loss)}
 .empty{background:var(--sunk);border:1px dashed var(--line);border-radius:6px;padding:12px 16px;color:var(--muted);font-size:15px}
-.screened{font-size:14px;color:var(--muted);margin:8px 2px 0}
-.tbl{overflow-x:auto;background:var(--surface);border:1px solid var(--line);border-radius:6px;margin-top:10px}
+.tbl{overflow-x:auto;border:1px solid var(--line);border-radius:6px;margin-top:10px}
 table{border-collapse:collapse;width:100%;font-size:14.5px}
 th,td{padding:7px 10px;text-align:right;white-space:nowrap;border-bottom:1px solid var(--line)}
-th{color:var(--muted);font-weight:600;font-size:13px}
+th{color:var(--muted);font-weight:600;font-size:13px;background:var(--sunk)}
 td:first-child,th:first-child{text-align:left}
 tr:last-child td{border-bottom:0}
+td.hot{background:var(--felt-soft)}
 .pos{color:var(--win);font-weight:600}.neg{color:var(--loss);font-weight:600}
 footer{color:var(--muted);font-size:13.5px;padding:40px 0 48px;max-width:76ch}
 @media (max-width:600px){.slip{grid-template-columns:1fr}.slip .odds,.slip .units{text-align:left}h2{font-size:34px}}
 </style></head><body><div class="wrap">
-<header><div class="mark"><h1>Substantial Losses</h1><p>Models, trends and track records for the NFL, NBA, college basketball and NHL. Updated Wed Nov 4, 8:01 PM ET.</p>
-<button class="theme" id="theme" type="button">Light / dark</button></div></header>
-<main><nav class="boards" aria-label="Dashboards"><a class="board" href="https://substantiallosses.com/edge.html"><b>NFL Edge</b><span>Updated Wed 8:00 PM</span><span>0 picks today</span></a><a class="board" href="https://halfwitty.github.io/NBADashboard/"><b>NBA Edge</b><span>Updated Wed 8:00 PM</span><span>6 picks today</span></a><a class="board" href="https://halfwitty.github.io/CBBDashboard/"><b>CBB Edge</b><span>Updated Wed 8:00 PM</span><span>1 pick today</span></a><a class="board" href="https://halfwitty.github.io/NHLDashboard/"><b>NHL Edge</b><span>Updated Wed 8:01 PM</span><span>2 picks today</span></a><a class="board extra" href="statsheet.html"><b>The Stat Sheet</b><span>Fantasy football stats</span><span>&nbsp;</span></a></nav><h2>Cream of the Crop</h2><p class="lede">Today's picks (Wednesday, November 4) from every board that pass the price limits and at least one of the rules below. Each group shows that group's record on its board so far.</p><ul class="rules"><li>Price limits: no underdog longer than +119, no favourite shorter than -300, and a claimed edge under 6%. Across NHL, NBA and NFL, picks outside these limits have done far worse.</li><li>Grade A, or the model and the trends picked the same side.</li><li>Or the pick's category (pick type and bet type) has 10+ graded picks with a winning record and a profit, and the pick is graded B or better.</li></ul><h3>NBA <a href="https://halfwitty.github.io/NBADashboard/">Open the NBA board</a></h3><section class="group"><div class="ghead"><b>Grade A</b><span>On the NBA board: <span class="rec">2-4, -2.1u</span></span><span>Inside the price limits: 0-1, -1.0u</span></div><div class="slip"><div class="bet">TOR +4.5</div><div class="odds">-108</div><div class="game">TOR @ DEN, Spread</div><div class="units">0.5u suggested</div><div class="facts"><span class="chip g">Grade A</span><span class="chip">Value</span><span>Model win chance <b>55%</b></span><span>Edge at this price <b>+5.0%</b></span></div></div></section><p class="screened">Met a rule but left out for price: TOR ML +169 (underdog longer than +119).</p><h2>How the boards' picks have done</h2><p class="lede">Every top bet and trend pick each board has listed with a price, graded once the game finished, at 1 unit each. This is what the Cream rules are built on, and it updates every run.</p><div class="tbl"><table><thead><tr><th>Board</th><th>All picks</th><th>Inside price limits</th><th>Outside price limits</th><th>Grade A</th><th>Grade B</th><th>Model and trends agree</th></tr></thead><tbody><tr><td>NFL</td><td>25-23-2<br><span class="neg">-4.7u</span></td><td>6-5-1<br><span class="neg">-1.0u</span></td><td>19-18-1<br><span class="neg">-3.7u</span></td><td>–</td><td>–</td><td>0-1<br><span class="neg">-1.0u</span></td></tr><tr><td>NBA</td><td>13-15<br><span class="neg">-5.4u</span></td><td>8-9<br><span class="neg">-2.5u</span></td><td>5-6<br><span class="neg">-2.9u</span></td><td>2-4<br><span class="neg">-2.1u</span></td><td>9-7<br><span class="neg">-1.1u</span></td><td>1-1<br><span class="neg">-0.1u</span></td></tr><tr><td>College basketball</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td></tr><tr><td>NHL</td><td>20-38<br><span class="neg">-16.5u</span></td><td>8-8<br><span class="neg">-1.4u</span></td><td>12-30<br><span class="neg">-15.1u</span></td><td>1-10<br><span class="neg">-9.0u</span></td><td>9-5<br><span class="pos">+5.5u</span></td><td>0-2<br><span class="neg">-2.0u</span></td></tr></tbody></table></div></main>
+<header><div class="mark"><h1>Substantial Losses</h1><p>Models, trends and track records for the NFL, NBA, college basketball and NHL. Updated Wed Nov 4, 8:27 PM ET.</p></div></header>
+<main><nav class="boards" aria-label="Dashboards"><a class="board" href="https://substantiallosses.com/edge.html"><b>NFL Edge</b><span><span class="warn">Last run failed; showing Wed 8:00 PM</span></span><span>0 picks today</span></a><a class="board" href="https://halfwitty.github.io/NBADashboard/"><b>NBA Edge</b><span>Updated Wed 8:27 PM</span><span>2 picks today</span></a><a class="board" href="https://halfwitty.github.io/CBBDashboard/"><b>CBB Edge</b><span>Updated Wed 8:27 PM</span><span>1 pick today</span></a><a class="board" href="https://halfwitty.github.io/NHLDashboard/"><b>NHL Edge</b><span>Updated Wed 8:27 PM</span><span>9 picks today</span></a><a class="board extra" href="statsheet.html"><b>The Stat Sheet</b><span>Fantasy football stats</span><span>&nbsp;</span></a></nav><h2>Cream of the Crop</h2><p class="lede">Today's picks (Wednesday, November 4) that have a good grade and come from the kinds of pick that have been winning on their board. Each group shows the records it qualified on.</p><ul class="rules"><li>Trend picks the model agrees with, on boards where trend picks have a winning record. The bet shown is the way to bet that side with the highest model win chance that still has an edge on the book's price.</li><li>Every Grade A pick.</li><li>Grade A or B picks whose pick type (high probability, value, trend or price check) and grade both have winning records on that board (8+ graded picks), with an edge on the book's price (price checks have no book price: take them at the number shown or better).</li></ul><div class="empty">No pick clears the bar today. On most days only a few picks deserve this section, and some days none do.</div><h2>What's been winning</h2><p class="lede">Every pick each board has shown, graded once the game finished. Shaded cells have a winning record with 8+ graded picks; those are the groups Cream of the Crop draws from. Units are flat 1-unit bets at the listed price (price checks have no book price, so only their record shows).</p><div class="tbl"><table><thead><tr><th>Board</th><th>All picks</th><th>Grade A</th><th>Grade B</th><th>Grade C</th><th>Grade D</th><th>Trend</th><th>Value</th><th>High probability</th><th>Price check</th></tr></thead><tbody><tr><td>NFL</td><td class="hot">25-23-2<br><span class="neg">-4.7u</span></td><td>–</td><td>–</td><td class="hot">9-5-1<br><span class="neg">-0.4u</span></td><td class="">16-18-1<br><span class="neg">-4.3u</span></td><td class="hot">13-9-2<br><span class="neg">-3.7u</span></td><td class="">7-9<br><span class="neg">-0.1u</span></td><td class="">5-5<br><span class="neg">-0.9u</span></td><td>–</td></tr><tr><td>NBA</td><td class="">13-15<br><span class="neg">-5.4u</span></td><td class="">2-4<br><span class="neg">-2.1u</span></td><td class="hot">9-7<br><span class="neg">-1.1u</span></td><td>–</td><td>–</td><td class="hot">9-6<br><span class="pos">+0.1u</span></td><td class="">3-5<br><span class="neg">-2.2u</span></td><td class="">1-4<br><span class="neg">-3.3u</span></td><td>–</td></tr><tr><td>College basketball</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td><td>–</td></tr><tr><td>NHL</td><td class="hot">73-68<br><span class="neg">-16.5u</span></td><td class="">1-10<br><span class="neg">-9.0u</span></td><td class="hot">35-14<br><span class="pos">+5.5u</span></td><td class="">12-12<br><span class="neg">-2.7u</span></td><td class="">7-14<br><span class="neg">-5.7u</span></td><td class="">7-9<br><span class="neg">-1.0u</span></td><td class="">8-25<br><span class="neg">-15.0u</span></td><td class="hot">5-4<br><span class="neg">-0.5u</span></td><td class="hot">53-30</td></tr></tbody></table></div></main>
 <footer>Picks are model output, not advice. Records are flat 1-unit bets at the listed price. Bet only what you can afford to lose.</footer>
-</div><script>
-(function(){const b=document.getElementById('theme');
-try{const t=localStorage.getItem('sl-theme');if(t)document.documentElement.dataset.theme=t}catch(e){}
-b&&b.addEventListener('click',()=>{const cur=document.documentElement.dataset.theme||(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light');
-const n=cur==='dark'?'light':'dark';document.documentElement.dataset.theme=n;try{localStorage.setItem('sl-theme',n)}catch(e){}})})();
-</script></body></html>
+</div></body></html>
