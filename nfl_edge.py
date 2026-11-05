@@ -103,6 +103,8 @@ LONG_RUN_SEASONS = [2023, 2024, 2025]   # full past seasons re-run under the sam
 # --- publish to GitHub (uses git and your saved GitHub sign-in, same as the NHL board; no token needed) ---
 PUSH_TO_GITHUB = True
 GITHUB_BRANCH = "main"
+GITHUB_REPO_URL = "https://github.com/HalfWitty/FootballFriend.git"
+GITHUB_SITE_DIR = "nfl_site"   # local clone of the repo, next to this script
 # ------------------------------------------------------------------
 
 SLEEPER_TO_NFLVERSE = {"LAR": "LA", "JAC": "JAX", "WSH": "WAS", "OAK": "LV", "SD": "LAC", "STL": "LA"}
@@ -2146,8 +2148,8 @@ def write_log(weeks, path):
     print(f"  [saved] {path} ({len(rows)} rows)")
 
 
-def _git(*args, check=True, quiet=False):
-    r = subprocess.run(["git", *args], stdout=subprocess.PIPE if quiet else None,
+def _git(*args, check=True, quiet=False, cwd=None):
+    r = subprocess.run(["git", *args], cwd=cwd, stdout=subprocess.PIPE if quiet else None,
                        stderr=subprocess.PIPE if quiet else None, text=True)
     if check and r.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed" + (f": {(r.stderr or '').strip()}" if quiet else ""))
@@ -2155,25 +2157,42 @@ def _git(*args, check=True, quiet=False):
 
 
 def push_to_github(files):
-    """Commit and push the board with git, using your saved GitHub sign-in (same as the NHL board)."""
+    """Publish the board through the FootballFriend clone in nfl_site/ (cloned on first run).
+    If this folder is itself a FootballFriend checkout, publish from here instead."""
     print(f"\n=== Publishing to GitHub ({GITHUB_BRANCH}) ===")
+    here = os.getcwd()
     try:
         if shutil.which("git") is None:
             raise RuntimeError("git isn't installed (https://git-scm.com)")
-        if _git("rev-parse", "--is-inside-work-tree", check=False, quiet=True).returncode != 0:
-            raise RuntimeError(f"{os.getcwd()} isn't a git copy of FootballFriend. Keep nfl_edge.py in your FootballFriend repo folder")
-        _git("add", "--", *files)
-        if _git("diff", "--cached", "--quiet", check=False).returncode == 0:
+        if _git("rev-parse", "--is-inside-work-tree", check=False, quiet=True).returncode == 0:
+            site = here
+        else:
+            site = os.path.join(here, GITHUB_SITE_DIR)
+            if not os.path.isdir(os.path.join(site, ".git")):
+                if os.path.exists(site) and os.listdir(site):
+                    raise RuntimeError(f"{site} exists but isn't a git clone; rename it and run again")
+                print(f"  Cloning {GITHUB_REPO_URL} into {GITHUB_SITE_DIR}/ ...")
+                _git("clone", "-q", GITHUB_REPO_URL, site)
+            # the landing page pushes to this repo too, so start from the latest copy
+            _git("fetch", "-q", "origin", GITHUB_BRANCH, cwd=site)
+            _git("checkout", "-q", "-B", GITHUB_BRANCH, f"origin/{GITHUB_BRANCH}", cwd=site)
+            for f in files:
+                dst = os.path.join(site, f)
+                os.makedirs(os.path.dirname(dst) or site, exist_ok=True)
+                shutil.copyfile(f, dst)
+        _git("add", "--", *files, cwd=site)
+        if _git("diff", "--cached", "--quiet", check=False, cwd=site).returncode == 0:
             print("  Nothing changed since the last publish.")
             return
         msg = f"Update NFL Edge Board ({time.strftime('%Y-%m-%d')})"
-        _git("commit", "-q", "-m", msg, "--", *files)
-        # pick up anything pushed from elsewhere (e.g. pull_2026_stats.py) before pushing
-        _git("pull", "-q", "--rebase", "--autostash", "origin", GITHUB_BRANCH)
-        if _git("push", "origin", GITHUB_BRANCH, check=False).returncode != 0:
-            raise RuntimeError("push failed. Make sure you're signed in to GitHub on this computer "
-                               "(Git Credential Manager, `gh auth login`, or an SSH key)")
-        print(f'  [done] "{msg}"')
+        _git("-c", "user.name=NFL Edge", "-c", "user.email=nfl-edge@users.noreply.github.com",
+             "commit", "-q", "-m", msg, "--", *files, cwd=site)
+        if _git("push", "-q", "origin", GITHUB_BRANCH, check=False, cwd=site).returncode != 0:
+            _git("pull", "-q", "--rebase", "--autostash", "origin", GITHUB_BRANCH, cwd=site)
+            if _git("push", "-q", "origin", GITHUB_BRANCH, check=False, cwd=site).returncode != 0:
+                raise RuntimeError("push failed. Make sure you're signed in to GitHub on this computer "
+                                   "(Git Credential Manager, `gh auth login`, or an SSH key)")
+        print(f'  [done] "{msg}" -> https://substantiallosses.com/{OUTPUT_HTML}')
     except RuntimeError as e:
         print(f"  [skip] Publish skipped: {e}")
 
