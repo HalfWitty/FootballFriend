@@ -2213,7 +2213,9 @@ def main():
     tgt = weeks[-1]
     nxt = None
     ng = games[(games.season == SEASON) & (games.week == target + 1)]
-    if len(ng) and ng.spread_line.notna().any() and not ng.done.any():
+    cur_started = bool(games[(games.season == SEASON) & (games.week == target)].done.any())
+    # next week's preview only once the current week is under way (e.g. Monday night still to play)
+    if cur_started and len(ng) and ng.spread_line.notna().any() and not ng.done.any():
         nxt = grade_week(build_week(SEASON, target + 1, games, tg, st, md, status=status, qbb=qbb), st)
         print(f"  week {target + 1} (next): {len(nxt['games'])} games, {len(nxt['picks'])} top bets")
 
@@ -2256,10 +2258,9 @@ def main():
 
     pending = sum(1 for og in tgt["games"] if not og["g"].done)
     done = len(tgt["games"]) - pending
-    top_list = []
+    top_list = [(tgt, f"Week {target} &middot; " + (f"in progress ({done} of {len(tgt['games'])} played)" if done else "upcoming"))]
     if nxt:
-        top_list.append((nxt, f"Week {nxt['week']} &middot; upcoming"))
-    top_list.append((tgt, f"Week {target} &middot; " + (f"graded ({done} of {len(tgt['games'])} played)" if done else "upcoming")))
+        top_list.append((nxt, f"Week {nxt['week']} &middot; preview"))
     warn = "" if status is not None or not USE_LIVE_STATUS else (
         '<div class="warnbox"><b>No injury data this run.</b> Sleeper and ESPN couldn\'t be reached, so projections use '
         'everyone who played in the last two weeks and the schedule feed\'s QBs. Check injuries before betting, or run again.</div>')
