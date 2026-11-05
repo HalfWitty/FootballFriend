@@ -73,7 +73,7 @@ REPO_RAW = "https://raw.githubusercontent.com/HalfWitty/FootballFriend/main/data
 GAMES_URL = "https://raw.githubusercontent.com/nflverse/nfldata/master/data/games.csv"
 OUTPUT_HTML = "edge.html"
 LOG_CSV = "nfl_data/predictions_log.csv"
-SITE_LINK = "index.html"  # link back to The Stat Sheet
+SITE_LINK = "statsheet.html"  # link back to The Stat Sheet
 STATUS_CACHE_DIR = "nfl_data"
 
 # --- team model (tuned on the 2025 season only, never on 2026) ---
